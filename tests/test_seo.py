@@ -822,3 +822,14 @@ def test_the_5000_limit_still_counts_the_whole_description():
     video = make_video(description="a" * 5001)
     context = replace(channel_context([video]), own_chars={"v1": 100})
     assert not check(video, "description_limit", context).passed
+
+
+def test_opening_unique_ignores_spacing_in_a_long_opening():
+    # the same 200-character opening, once with doubled spaces and line breaks: still the same opening
+    words = "We build a raised garden bed in one day and then plant the first seeds of the new season " * 3
+    spaced = words.replace(" ", "  ").replace("garden", "garden\n")
+    assert len(words) > seo.HOOK_WINDOW
+    assert seo.opening_key(spaced) == seo.opening_key(words)
+    a, b = make_video(video_id="a", description=words), make_video(video_id="b", description=spaced)
+    result = check(a, "description_opening_unique", channel_context([a, b]))
+    assert result.applicable and not result.passed

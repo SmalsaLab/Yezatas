@@ -345,8 +345,9 @@ def _hook_text(description: str) -> str:
 
 
 def opening_key(description: str) -> str:
-    """The opening text compared between videos: `_hook_text`, case-folded, spaces collapsed."""
-    return " ".join(_hook_text(description).casefold().split())
+    """The opening text compared between videos: `_hook_text` of the description with its spaces and line
+    breaks collapsed first (so spacing cannot move words out of the window), case-folded."""
+    return _hook_text(" ".join(description.split())).casefold()
 
 
 def _first_line_problem(description: str) -> str:

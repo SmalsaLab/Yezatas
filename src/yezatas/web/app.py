@@ -70,6 +70,7 @@ from .views import stale_youtube_keys
 from .video_analytics_view import build_video_analytics
 from .category_view import build_category_view
 from .pinned_view import build_pinned_view
+from . import template_view as template_view_mod
 from .nav_counts import build_nav_counts
 from ..store import AdCheck, CategoryCheck, OutlierReport, PinnedComment, ShortsFind, Store, ThumbnailVariant
 from ..subtitles import to_srt
@@ -4129,6 +4130,280 @@ def create_app(
         kind, message = await run_in_threadpool(work)
         flash(request, kind, message)
         return see_other("/replies")
+
+    # --- description templates (phase 2a): the page and its actions; nothing here reaches YouTube --------
+    # What a form held when the store refused it, per session, shown once on the next page (like a flash).
+    typed_forms: dict[str, dict[str, dict[str, str]]] = {}
+    typed_lock = threading.Lock()
+
+    def keep_typed(request: Request, form_key: str, values: dict[str, str]) -> None:
+        with typed_lock:
+            typed_forms.setdefault(request.state.session_id, {})[form_key] = values
+
+    def pop_typed(request: Request) -> dict[str, dict[str, str]]:
+        with typed_lock:
+            return typed_forms.pop(request.state.session_id, {})
+
+    def templates_target(template_id: int | None, anchor: str = "template") -> str:
+        url = template_view_mod.PAGE_URL
+        if template_id is not None:
+            url += f"?template={template_id}"
+        return url + (f"#{anchor}" if anchor else "")
+
+    def existing_template(store: Store, template_id: int | None) -> Any:
+        found = store.get_description_template(template_id) if template_id is not None else None
+        if found is None:
+            raise ValueError("That template does not exist.")
+        return found
+
+    async def template_action(request: Request, work: Callable[[Store, Any], tuple[str, str, str]],
+                              form_key: str = "", keep: Sequence[str] = (), anchor: str = "template") -> Response:
+        """Run one action: `work(store, form)` returns (kind, message, where to go back). A ValueError
+        becomes an error flash with its sentence, and the fields in `keep` are shown again as typed."""
+        form = await read_form(request)
+        back_id = _template_id(str(form.get("template") or ""))
+
+        def run() -> tuple[str, str, str]:
+            with Store(config.catalog_db) as store:
+                try:
+                    return work(store, form)
+                except ValueError as exc:
+                    if back_id is not None and store.get_description_template(back_id) is None:
+                        return "error", str(exc), templates_target(None)
+                    return "error", str(exc), templates_target(back_id, anchor)
+
+        kind, message, target = await run_in_threadpool(run)
+        if kind == "error" and form_key:
+            keep_typed(request, form_key, {k: str(form.get(k) or "") for k in keep})
+        if message:
+            flash(request, kind, message)
+        return see_other(target)
+
+    @app.get(template_view_mod.PAGE_URL)
+    def description_templates_page(request: Request) -> Response:
+        with Store(config.catalog_db) as store:
+            videos = store.list_videos()
+            blocks = store.list_template_blocks()
+            dtemplates = store.list_description_templates()
+            choices = store.template_choices()
+            include_shorts = store.templates_include_shorts()
+            playlists = store.playlists()
+            judgments, _ = descriptiontemplate_mod.judge_catalog(store, videos)
+        view = template_view_mod.build_templates_page(videos, blocks, dtemplates, choices, include_shorts,
+                                                      playlists, judgments, dict(request.query_params),
+                                                      pop_typed(request))
+        return render(request, "description_templates.html", {"active": "description_templates", "tp": view})
+
+    @app.post(template_view_mod.PAGE_URL + "/start")
+    async def start_description_templates(request: Request) -> Response:
+        def work(store: Store, form: Any) -> tuple[str, str, str]:
+            if store.list_description_templates():
+                return "info", "You already have a template, so nothing was added.", templates_target(None)
+            by_name = {b.name.casefold(): b.id for b in store.list_template_blocks()}
+            sections: list[dict[str, Any]] = []
+            for section in descriptiontemplate_mod.STARTER_SECTIONS:
+                if section["kind"] != "block":
+                    sections.append({"kind": section["kind"]})
+                    continue
+                name = str(section["name"])
+                block_id = by_name.get(name.casefold())
+                if block_id is None:
+                    block_id = store.add_template_block(name, template_view_mod.STARTER_PLACEHOLDERS[name],
+                                                        link_slot=bool(section.get("link_slot")))
+                sections.append({"kind": "block", "block_id": block_id})
+            new_id = store.add_description_template(template_view_mod.STARTER_NAME, sections, is_default=True)
+            return ("ok", "Added the suggested template. Replace the text of its shared blocks with your own.",
+                    templates_target(new_id))
+
+        return await template_action(request, work)
+
+    @app.post(template_view_mod.PAGE_URL + "/new")
+    async def new_description_template(request: Request) -> Response:
+        def work(store: Store, form: Any) -> tuple[str, str, str]:
+            sections: Sequence[dict[str, Any]] = ()
+            if str(form.get("start") or "") == "copy":
+                sections = existing_template(store, _template_id(str(form.get("template") or ""))).sections
+            new_id = store.add_description_template(str(form.get("name") or ""), sections)
+            return "ok", "Template added.", templates_target(new_id)
+
+        return await template_action(request, work, "new", ("name", "start"), "new-template")
+
+    @app.post(template_view_mod.PAGE_URL + "/settings")
+    async def description_template_settings(request: Request) -> Response:
+        def work(store: Store, form: Any) -> tuple[str, str, str]:
+            include = str(form.get("include_shorts") or "") == "1"
+            store.set_templates_include_shorts(include)
+            message = "Shorts now follow templates." if include else "Shorts are now left out of templates."
+            return "ok", message, templates_target(_template_id(str(form.get("template") or "")), "settings")
+
+        return await template_action(request, work, anchor="settings")
+
+    @app.post(template_view_mod.PAGE_URL + "/{template_id}/rename")
+    async def rename_description_template(request: Request, template_id: str) -> Response:
+        wanted = _template_id(template_id)
+
+        def work(store: Store, form: Any) -> tuple[str, str, str]:
+            existing_template(store, wanted)
+            store.update_description_template(wanted, name=str(form.get("name") or ""))  # type: ignore[arg-type]
+            return "ok", "Template renamed.", templates_target(wanted)
+
+        return await template_action(request, work, "rename", ("name",))
+
+    @app.post(template_view_mod.PAGE_URL + "/{template_id}/default")
+    async def default_description_template(request: Request, template_id: str) -> Response:
+        wanted = _template_id(template_id)
+
+        def work(store: Store, form: Any) -> tuple[str, str, str]:
+            found = existing_template(store, wanted)
+            store.set_default_template(found.id)
+            return "ok", f"\"{found.name}\" is now the default template.", templates_target(found.id)
+
+        return await template_action(request, work)
+
+    @app.post(template_view_mod.PAGE_URL + "/{template_id}/delete")
+    async def delete_description_template(request: Request, template_id: str) -> Response:
+        wanted = _template_id(template_id)
+
+        def work(store: Store, form: Any) -> tuple[str, str, str]:
+            found = existing_template(store, wanted)
+            picked = sum(1 for v in store.template_choices().values() if v == found.id)
+            store.delete_description_template(found.id)
+            extra = (f" {picked} hand-picked {'choice' if picked == 1 else 'choices'} went with it."
+                     if picked else "")
+            return "ok", f"Deleted \"{found.name}\".{extra}", templates_target(None)
+
+        return await template_action(request, work)
+
+    @app.post(template_view_mod.PAGE_URL + "/{template_id}/move")
+    async def move_description_template(request: Request, template_id: str) -> Response:
+        wanted = _template_id(template_id)
+
+        def work(store: Store, form: Any) -> tuple[str, str, str]:
+            found = existing_template(store, wanted)
+            ids = [t.id for t in store.list_description_templates()]
+            store.reorder_description_templates(
+                template_view_mod.moved(ids, ids.index(found.id), str(form.get("direction") or "")))
+            return "ok", "Priority changed.", templates_target(found.id)
+
+        return await template_action(request, work)
+
+    @app.post(template_view_mod.PAGE_URL + "/{template_id}/rules/add")
+    async def add_description_template_rule(request: Request, template_id: str) -> Response:
+        wanted = _template_id(template_id)
+
+        def work(store: Store, form: Any) -> tuple[str, str, str]:
+            found = existing_template(store, wanted)
+            kind, value = str(form.get("kind") or ""), str(form.get("value") or "")
+            if kind == "playlist" and value not in {p.playlist_id for p in store.playlists()}:
+                raise ValueError("Choose one of your playlists.")
+            store.update_description_template(found.id, rules=[*found.rules, {"kind": kind, "value": value}])
+            return "ok", "Rule added.", templates_target(found.id, "rules")
+
+        return await template_action(request, work, "rules", ("kind", "value"), "rules")
+
+    @app.post(template_view_mod.PAGE_URL + "/{template_id}/rules/remove")
+    async def remove_description_template_rule(request: Request, template_id: str) -> Response:
+        wanted = _template_id(template_id)
+
+        def work(store: Store, form: Any) -> tuple[str, str, str]:
+            found = existing_template(store, wanted)
+            target = {"kind": str(form.get("kind") or ""), "value": str(form.get("value") or "")}
+            if target not in found.rules:
+                raise ValueError("That rule is not in this template.")
+            rules = list(found.rules)
+            rules.remove(target)
+            store.update_description_template(found.id, rules=rules)
+            return "ok", "Rule removed.", templates_target(found.id, "rules")
+
+        return await template_action(request, work, anchor="rules")
+
+    @app.post(template_view_mod.PAGE_URL + "/{template_id}/sections/add")
+    async def add_description_template_section(request: Request, template_id: str) -> Response:
+        wanted = _template_id(template_id)
+
+        def work(store: Store, form: Any) -> tuple[str, str, str]:
+            found = existing_template(store, wanted)
+            section = template_view_mod.parse_section(str(form.get("section") or ""))
+            store.update_description_template(found.id, sections=[*found.sections, section])
+            return "ok", "Section added at the end. Move it to its place.", templates_target(found.id, "sections")
+
+        return await template_action(request, work, anchor="sections")
+
+    def _section_index(found: Any, key: str) -> int:
+        keys = [template_view_mod.section_key(s) for s in found.sections]
+        if key not in keys:
+            raise ValueError("That section is not in this template.")
+        return keys.index(key)
+
+    @app.post(template_view_mod.PAGE_URL + "/{template_id}/sections/move")
+    async def move_description_template_section(request: Request, template_id: str) -> Response:
+        wanted = _template_id(template_id)
+
+        def work(store: Store, form: Any) -> tuple[str, str, str]:
+            found = existing_template(store, wanted)
+            index = _section_index(found, str(form.get("section") or ""))
+            store.update_description_template(found.id, sections=template_view_mod.moved(
+                found.sections, index, str(form.get("direction") or "")))
+            return "ok", "Section moved.", templates_target(found.id, "sections")
+
+        return await template_action(request, work, anchor="sections")
+
+    @app.post(template_view_mod.PAGE_URL + "/{template_id}/sections/remove")
+    async def remove_description_template_section(request: Request, template_id: str) -> Response:
+        wanted = _template_id(template_id)
+
+        def work(store: Store, form: Any) -> tuple[str, str, str]:
+            found = existing_template(store, wanted)
+            index = _section_index(found, str(form.get("section") or ""))
+            store.update_description_template(
+                found.id, sections=[s for n, s in enumerate(found.sections) if n != index])
+            return "ok", "Section removed.", templates_target(found.id, "sections")
+
+        return await template_action(request, work, anchor="sections")
+
+    @app.post(template_view_mod.PAGE_URL + "/blocks/add")
+    async def add_shared_block(request: Request) -> Response:
+        def work(store: Store, form: Any) -> tuple[str, str, str]:
+            store.add_template_block(str(form.get("name") or ""), str(form.get("text") or ""),
+                                     link_slot=str(form.get("link_slot") or "") == "1")
+            return "ok", "Shared block added.", templates_target(_template_id(str(form.get("template") or "")),
+                                                                 "blocks")
+
+        return await template_action(request, work, "blocks:add", ("name", "text", "link_slot"), "block-add")
+
+    @app.post(template_view_mod.PAGE_URL + "/blocks/{block_id}/edit")
+    async def edit_shared_block(request: Request, block_id: str) -> Response:
+        wanted = _template_id(block_id)
+
+        def work(store: Store, form: Any) -> tuple[str, str, str]:
+            before = store.get_template_block(wanted) if wanted is not None else None
+            if before is None:
+                raise ValueError("That block does not exist.")
+            store.update_template_block(before.id, name=str(form.get("name") or ""),
+                                        text=str(form.get("text") or ""),
+                                        link_slot=str(form.get("link_slot") or "") == "1")
+            after = store.get_template_block(before.id)
+            message = "Shared block saved."
+            if after is not None and after.text != before.text:
+                message += (" The old text is remembered, so videos that still carry it show as out of date "
+                            "instead of missing.")
+            return "ok", message, templates_target(_template_id(str(form.get("template") or "")),
+                                                   f"block-{before.id}")
+
+        return await template_action(request, work, f"blocks:{wanted}", ("name", "text", "link_slot"),
+                                     f"block-{wanted}")
+
+    @app.post(template_view_mod.PAGE_URL + "/blocks/{block_id}/delete")
+    async def delete_shared_block(request: Request, block_id: str) -> Response:
+        wanted = _template_id(block_id)
+
+        def work(store: Store, form: Any) -> tuple[str, str, str]:
+            back = _template_id(str(form.get("template") or ""))
+            if wanted is None or not store.delete_template_block(wanted):
+                raise ValueError("That block does not exist.")
+            return "ok", "Shared block deleted.", templates_target(back, "blocks")
+
+        return await template_action(request, work, anchor="blocks")
 
     # --- affiliate links (G2) ---------------------------------------------------------------------
     def affiliate_path() -> Path:

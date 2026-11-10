@@ -5,7 +5,7 @@ Pure code, no I/O and no model calls, so the suggestion agent can cite these fac
 INTERFACE (stable; the web UI codes against it):
 - `channel_context(videos)` -> ChannelContext: facts across the catalog (duplicate titles, ...).
 - `score_video(video, context)` -> Scorecard.
-- `score_catalog(videos)` -> dict video_id -> Scorecard (builds the context once).
+- `score_catalog(videos, ...)` -> dict video_id -> Scorecard (builds the context once).
 - `fix_priority(video, card)` -> float: views x missing points; higher = fix first.
 - `CATEGORIES`: display order and labels of the check categories.
 - `parse_duration(iso)` -> seconds or None; `CHECKS`: the ordered check functions.
@@ -14,7 +14,7 @@ INTERFACE (stable; the web UI codes against it):
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Callable, Iterable, Mapping, Sequence
 
 from .store import Video
@@ -35,6 +35,7 @@ TITLE_EMOJI_MAX = 2
 DESCRIPTION_GOOD, DESCRIPTION_OK = 500, 250
 DESCRIPTION_LIMIT = 5000
 HOOK_WINDOW, HOOK_MIN_TEXT = 150, 50
+TEMPLATE_FIXED_POINTS, TEMPLATE_ORDER_POINTS = 7, 3  # the description template check is out of 10
 SEPARATOR_MAX_TEXT = 20  # letters allowed on a mostly-separator line
 TITLE_WORDS_WINDOW = 200
 HASHTAGS_GOOD_MAX, HASHTAGS_OK_MAX = 3, 15
@@ -138,6 +139,31 @@ class CategoryJudgment:
 
 
 @dataclass(frozen=True)
+class TemplateJudgment:
+    """How one video's description follows its description template, as the template check needs it.
+
+    Made by `descriptiontemplate.judge_catalog`; this module only reads it."""
+
+    template_name: str = ""
+    applicable: bool = True  # False: the video is excluded or has no template (see `reason`)
+    reason: str = ""  # why this template, or why none, in plain English
+    fixed_points: int = 0  # 0..7: the shared blocks
+    order_ok: bool = True  # earns the 3 order points
+    blocks_total: int = 0  # shared blocks in the template
+    blocks_current: int = 0  # of those, how many have the current text
+    missing: tuple[str, ...] = ()  # names of shared blocks that are not in the description
+    out_of_date: tuple[str, ...] = ()  # names of shared blocks found only as an old version
+    wrong_place: tuple[str, ...] = ()  # names of blocks and sections found out of the template's order
+    template_id: int = 0
+    excluded: bool = False  # the video is left out of templates (by hand, or as a Short)
+
+    @property
+    def points(self) -> int:
+        """Earned points of the template check, 0..10."""
+        return self.fixed_points + (TEMPLATE_ORDER_POINTS if self.order_ok else 0)
+
+
+@dataclass(frozen=True)
 class ChannelContext:
     title_counts: dict[str, int] = field(default_factory=dict)  # normalized title -> videos
     # video id -> its translations on YouTube made from an older title or description: they do not count
@@ -146,6 +172,11 @@ class ChannelContext:
     category_checks: dict[str, CategoryJudgment] = field(default_factory=dict)
     # video id -> "own", "marked" or "none" (see Store.pinned_states); a video left out is not judged
     pinned: dict[str, str] = field(default_factory=dict)
+    # video id -> how its description follows its template; a video left out is not judged
+    templates: dict[str, TemplateJudgment] = field(default_factory=dict)
+    # video id -> characters of the description's own text (shared blocks taken out); left out = all of it
+    own_chars: dict[str, int] = field(default_factory=dict)
+    opening_counts: dict[str, int] = field(default_factory=dict)  # normalized opening -> non-Short videos
 
 
 def normalize_title(title: str) -> str:
@@ -154,10 +185,15 @@ def normalize_title(title: str) -> str:
 
 def channel_context(videos: Iterable[Video]) -> ChannelContext:
     counts: dict[str, int] = {}
+    openings: dict[str, int] = {}
     for video in videos:
         key = normalize_title(video.title)
         counts[key] = counts.get(key, 0) + 1
-    return ChannelContext(title_counts=counts)
+        if not is_short(video):
+            hook = opening_key(video.description)
+            if len(hook) >= HOOK_MIN_TEXT:
+                openings[hook] = openings.get(hook, 0) + 1
+    return ChannelContext(title_counts=counts, opening_counts=openings)
 
 
 def parse_duration(duration: str) -> int | None:
@@ -282,12 +318,20 @@ def check_title_punctuation(video: Video, context: ChannelContext | None) -> Che
                    "Use a single ! or ? at most and keep to two emojis or fewer.")
 
 
-# --- Description checks (39 points) ---
+# --- Description checks (52 points) ---
 
 def check_description_length(video: Video, context: ChannelContext | None) -> CheckResult:
+    """Counts the video's own text: the shared template blocks found in it are taken out first."""
     title = "Description is at least 500 characters"
-    n = len(video.description.strip())
+    whole = len(video.description.strip())
+    own = context.own_chars.get(video.video_id) if context else None
+    n = whole if own is None else min(own, whole)
     points = 5 if n >= DESCRIPTION_GOOD else _half(5) if n >= DESCRIPTION_OK else 0
+    if n < whole:
+        return _result("description_length", "description", title, 5, points,
+                       f"Your own text is {n} characters (shared blocks not counted).",
+                       f"Write at least {DESCRIPTION_GOOD} characters of your own about what the video "
+                       f"covers; it is {n} now.")
     return _result("description_length", "description", title, 5, points,
                    f"The description is {n} characters.",
                    f"Write at least {DESCRIPTION_GOOD} characters about what the video covers; "
@@ -298,6 +342,11 @@ def _hook_text(description: str) -> str:
     window = description[:HOOK_WINDOW]
     window = _HASHTAG.sub(" ", _URL.sub(" ", window))
     return " ".join(window.split())
+
+
+def opening_key(description: str) -> str:
+    """The opening text compared between videos: `_hook_text`, case-folded, spaces collapsed."""
+    return " ".join(_hook_text(description).casefold().split())
 
 
 def _first_line_problem(description: str) -> str:
@@ -328,6 +377,24 @@ def check_description_hook(video: Video, context: ChannelContext | None) -> Chec
                    "Start with one or two sentences that say what the video is about; move "
                    "links and promos lower. This text shows above \"more\" and in search "
                    "results.")
+
+
+def check_description_opening_unique(video: Video, context: ChannelContext | None) -> CheckResult:
+    title = "Description opening is not used on another video"
+    if is_short(video):
+        return _skip("description_opening_unique", "description", title, 3,
+                     "Shorts do not show a description opening.")
+    key = opening_key(video.description)
+    if context is None or len(key) < HOOK_MIN_TEXT:
+        return _skip("description_opening_unique", "description", title, 3,
+                     "" if context is None else "The opening is too short to compare.")
+    count = context.opening_counts.get(key, 0)
+    ok = count <= 1
+    return _result("description_opening_unique", "description", title, 3, 3 if ok else 0,
+                   "No other video opens with the same text." if ok else
+                   f"{count} videos on the channel open with the same text.",
+                   "Write an opening that says what this video covers; the same first lines on "
+                   "every video give search and viewers nothing to tell them apart.")
 
 
 def check_description_title_words(video: Video, context: ChannelContext | None) -> CheckResult:
@@ -363,6 +430,29 @@ def check_description_related_links(video: Video, context: ChannelContext | None
                    "A link to another video or playlist is there." if ok else
                    "No link to another video or playlist found.",
                    "Link a related video or playlist so viewers keep watching your channel.")
+
+
+def timestamp_seconds(line: str) -> int | None:
+    """Seconds of the timestamp that starts this line ("1:30 Setup"), or None."""
+    match = _TIMESTAMP.match(line)
+    if not match:
+        return None
+    h, m, s = match.groups()
+    return int(h or 0) * 3600 + int(m) * 60 + int(s)
+
+
+def has_url(text: str) -> bool:
+    return _URL.search(text) is not None
+
+
+def has_related_link(text: str) -> bool:
+    """A link to a YouTube video, Short or playlist."""
+    return _RELATED_LINK.search(text) is not None
+
+
+def is_hashtag_line(line: str) -> bool:
+    """A line made only of hashtags."""
+    return _HASHTAG.search(line) is not None and not _HASHTAG.sub("", line).strip()
 
 
 def parse_chapters(description: str) -> list[int]:
@@ -468,6 +558,58 @@ def check_engagement_prompt(video: Video, context: ChannelContext | None) -> Che
     return _result("engagement_prompt", "description", title, 2, 2 if ok else 0,
                    "A call to action is there." if ok else "No call to action found.",
                    "Add a short line asking viewers to subscribe, like or comment.")
+
+
+def _names(items: Sequence[str]) -> str:
+    """"A", "A and B", "A, B and C"."""
+    items = list(items)
+    return items[0] if len(items) == 1 else ", ".join(items[:-1]) + " and " + items[-1]
+
+
+def _join_steps(steps: Sequence[str]) -> str:
+    steps = list(steps)
+    if len(steps) < 3:
+        return " and ".join(steps)
+    return ", ".join(steps[:-1]) + ", and " + steps[-1]
+
+
+def check_description_template(video: Video, context: ChannelContext | None) -> CheckResult:
+    title = "Follows the description template"
+    max_points = TEMPLATE_FIXED_POINTS + TEMPLATE_ORDER_POINTS
+    judgment = context.templates.get(video.video_id) if context else None
+    if judgment is None:
+        return _skip("description_template", "description", title, max_points,
+                     "Description templates are not set up yet.")
+    if not judgment.applicable:
+        return _skip("description_template", "description", title, max_points, judgment.reason)
+    clauses: list[str] = []
+    steps: list[str] = []
+    if judgment.out_of_date:
+        many = len(judgment.out_of_date) > 1
+        clauses.append(f"{_names(judgment.out_of_date)} {'are old versions' if many else 'is an old version'}")
+        steps.append(f"update {_names(judgment.out_of_date)} to the current text")
+    if judgment.missing:
+        many = len(judgment.missing) > 1
+        clauses.append(f"{_names(judgment.missing)} {'are' if many else 'is'} missing")
+        steps.append(f"add {_names(judgment.missing)}")
+    if judgment.wrong_place:
+        many = len(judgment.wrong_place) > 1
+        clauses.append(f"{_names(judgment.wrong_place)} {'are' if many else 'is'} out of order")
+        steps.append(f"move {_names(judgment.wrong_place)} to {'their places' if many else 'its place'} "
+                     "in the template")
+    if not judgment.order_ok and not judgment.wrong_place:
+        clauses.append("too little of the template is there to check its order")
+        if not steps:
+            steps.append("add the template's shared blocks so its order can be checked")
+    head = (f'Follows "{judgment.template_name}": '
+            + (f"{judgment.blocks_current} of {judgment.blocks_total} shared blocks current"
+               if judgment.blocks_total else "it has no shared blocks"))
+    detail = head + ("; " + "; ".join(clauses) if clauses else "") + "."
+    fix = ""
+    if steps:
+        fix = _join_steps(steps)
+        fix = fix[0].upper() + fix[1:] + "."
+    return _result("description_template", "description", title, max_points, judgment.points, detail, fix)
 
 
 # --- Tag checks (14 points) ---
@@ -642,6 +784,7 @@ CHECKS: tuple[CheckFn, ...] = (
     check_title_punctuation,
     check_description_length,
     check_description_hook,
+    check_description_opening_unique,
     check_description_title_words,
     check_description_links_ok,
     check_description_related_links,
@@ -651,6 +794,7 @@ CHECKS: tuple[CheckFn, ...] = (
     check_description_limit,
     check_description_not_title_copy,
     check_engagement_prompt,
+    check_description_template,
     check_tags_present,
     check_tags_length,
     check_tags_title_match,
@@ -675,14 +819,17 @@ def score_video(video: Video, context: ChannelContext | None = None) -> Scorecar
 def score_catalog(videos: Iterable[Video],
                   stale_localizations: Mapping[str, frozenset[str]] | None = None,
                   category_checks: Mapping[str, CategoryJudgment] | None = None,
-                  pinned: Mapping[str, str] | None = None) -> dict[str, Scorecard]:
+                  pinned: Mapping[str, str] | None = None,
+                  templates: Mapping[str, TemplateJudgment] | None = None,
+                  own_chars: Mapping[str, int] | None = None) -> dict[str, Scorecard]:
     """`stale_localizations`: video id -> translations on YouTube made from older text (not counted).
-    `category_checks`: video id -> its finished category check. `pinned`: video id -> its pinned state."""
+    `category_checks`: video id -> its finished category check. `pinned`: video id -> its pinned state.
+    `templates`: video id -> how its description follows its template. `own_chars`: video id -> characters
+    of its own text, shared blocks taken out (both come from `descriptiontemplate.judge_catalog`)."""
     videos = list(videos)
-    context = channel_context(videos)
-    if stale_localizations or category_checks or pinned:
-        context = ChannelContext(context.title_counts, dict(stale_localizations or {}),
-                                 dict(category_checks or {}), dict(pinned or {}))
+    context = replace(channel_context(videos), stale_localizations=dict(stale_localizations or {}),
+                      category_checks=dict(category_checks or {}), pinned=dict(pinned or {}),
+                      templates=dict(templates or {}), own_chars=dict(own_chars or {}))
     return {v.video_id: score_video(v, context) for v in videos}
 
 

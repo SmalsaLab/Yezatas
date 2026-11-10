@@ -59,6 +59,7 @@ from .. import affiliate as affiliate_mod
 from .. import bulkagent as bulkagent_mod
 from .. import comments as comments_mod
 from .. import customchecks as customchecks_mod
+from .. import descriptiontemplate as descriptiontemplate_mod
 from .. import glossary as glossary_mod
 from .. import replytemplates as replytemplates_mod
 from .. import postreply as postreply_mod
@@ -2338,10 +2339,13 @@ def create_app(
                       for vid, c in store.category_checks().items() if c.status == "done"}
             # A comment from the channel among the fetched ones, or the user's "I pinned one already".
             pinned_states = store.pinned_states()
+            # How each description follows its template, and the length of its own text.
+            template_judgments, own_chars = descriptiontemplate_mod.judge_catalog(store, videos)
             guard = QuotaGuard(store, config.daily_quota_budget)
             used, remaining = guard.used(), guard.remaining()
             pull = store.latest_pull()
-        entries = make_entries(videos, score_catalog(videos, stale, judged, pinned_states))
+        entries = make_entries(videos, score_catalog(videos, stale, judged, pinned_states,
+                                                     templates=template_judgments, own_chars=own_chars))
         return {
             "entries": entries, "as_of": pull_moment(pull) if pull is not None else None, "stale": stale,
             "latest_pull": {"videos": latest[0], "when": _local_time(latest[1])},

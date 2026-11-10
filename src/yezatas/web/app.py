@@ -4225,6 +4225,9 @@ def create_app(
                 found = next((c for c in result.candidates if c.key == key), None)
                 if found is None:
                     return "error", "That text is no longer repeated on your videos.", back
+                if found.already_older:
+                    return ("info", f"An older version of that text is already the shared block {found.already}.",
+                            back + f"#build-{key}")
                 if found.already:
                     return "info", f"That text is already the shared block {found.already}.", back + f"#build-{key}"
                 # The server's own text, never the form's. Older versions go in first, least carried first (the
@@ -4232,8 +4235,10 @@ def create_app(
                 texts = [found.text]
                 if typed["remember"] == "1":
                     texts = [text for text, _ in reversed(found.versions)] + texts
+                link_slot = typed["link_slot"] == "1"
+                placeholder = templatebuild_mod.placeholder_block(store.list_template_blocks(), typed["name"])
                 try:
-                    block_id = store.add_template_block(typed["name"], texts[0], link_slot=typed["link_slot"] == "1")
+                    block_id = store.add_template_block(typed["name"], texts[0], link_slot=link_slot)
                 except ValueError as exc:
                     return "error", str(exc), back + f"#build-{key}"
                 try:
@@ -4242,7 +4247,15 @@ def create_app(
                 except ValueError as exc:
                     store.delete_template_block(block_id)
                     return "error", str(exc), back + f"#build-{key}"
-                return "ok", "", back + f"?added={block_id}#build-{key}"
+                if placeholder is None:
+                    return "ok", "", back + f"?added={block_id}#build-{key}"
+                # A block with this name still holds its starter placeholder: fill that block instead (same id,
+                # so the templates that use it keep working). Every text went through the store above, so these
+                # updates cannot be refused halfway; the placeholder left in its old versions is never matched.
+                store.delete_template_block(block_id)
+                for n, text in enumerate(texts):
+                    store.update_template_block(placeholder.id, text=text, link_slot=link_slot if n == 0 else None)
+                return "ok", "", back + f"?added={placeholder.id}&filled=1#build-{key}"
 
         kind, message, target = await run_in_threadpool(run)
         if kind == "error":

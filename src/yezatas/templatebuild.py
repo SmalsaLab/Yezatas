@@ -17,14 +17,21 @@ How lines become candidates (deterministic, the same input always gives the same
    keeps lines that only meet by chance apart; rule (ii) keeps two blocks apart when one is usually alone. A run
    is cut wherever a join fails; each piece is one candidate text.
 5. Candidates. A piece on at least as many videos as a repeated line needs (counted once per video) is a candidate.
-   The candidate text is its lines joined by single line breaks (blank lines between them are not kept; the block
-   parser skips blank lines anyway).
+6. Blank lines. The candidate text keeps the blank lines the way most of its videos have them: between two
+   neighbouring lines there is one blank line when more than half of the candidate's videos have at least one
+   blank line there (the first copy on each video counts), otherwise none; never more than one. Everything that
+   compares texts (versions, `already`, the order and the key) uses the non-blank lines only, so the key stays the
+   same when only the blank lines change.
 
 Versions: two candidates are versions of one block when they have the same number of lines (two or more) and
-differ in exactly one line. Candidates are taken in order (most videos first, then most lines, then text); each
+differ in exactly one non-blank line. Candidates are taken in order (most videos first, then most lines, then text); each
 one either joins the first earlier candidate it is a version of, as an older version, or starts a new candidate.
 So the version on the most videos is the candidate's text, and the older versions are listed with their counts.
 A one-line candidate has no versions: one changed line would be the whole text.
+
+Already in the library: a candidate is marked `already` with a block's name when its text, or one of its older
+versions, is that block's current text or one of its old versions (non-blank lines compared). Placeholder blocks
+and placeholder old versions do not count. `already_older` says only an older version matched.
 """
 
 from __future__ import annotations
@@ -36,7 +43,7 @@ from dataclasses import dataclass, field
 from typing import Iterable, Sequence
 
 from . import seo
-from .descriptiontemplate import is_placeholder
+from .descriptiontemplate import is_placeholder, real_old_versions
 from .store import TemplateBlock, Video
 
 MIN_VIDEOS = 3  # a line must be on at least this many videos...
@@ -55,7 +62,7 @@ SUPPORT_NAME = "Support and follow"
 
 @dataclass(frozen=True)
 class Candidate:
-    key: str  # a short stable hash of the text, for the form
+    key: str  # a short stable hash of the text's non-blank lines, for the form
     text: str
     line_count: int
     video_count: int
@@ -63,7 +70,8 @@ class Candidate:
     examples: tuple[str, ...]  # up to 3 video ids that carry this text, most viewed first
     versions: tuple[tuple[str, int], ...] = ()  # older versions: (text, video count), most carried first
     has_urls: bool = False
-    already: str = ""  # the shared block that already holds this text, or ""
+    already: str = ""  # the shared block that already holds this text (or an older version of it), or ""
+    already_older: bool = False  # only an older version is that block's text: most videos carry a newer one
     suggested_name: str = ""
     suggested_link_slot: bool = False
 
@@ -79,6 +87,19 @@ class BuildResult:
 class _Piece:
     lines: tuple[str, ...]
     videos: set[str] = field(default_factory=set)
+    gaps: dict[str, tuple[bool, ...]] = field(default_factory=dict)  # per video: a blank line before line i+1
+
+    def add(self, vid: str, gaps: tuple[bool, ...]) -> None:
+        self.videos.add(vid)
+        self.gaps.setdefault(vid, gaps)
+
+    def text(self) -> str:
+        """The lines, with one blank line in each gap where more than half of the videos have one."""
+        out = [self.lines[0]]
+        for i, line in enumerate(self.lines[1:]):
+            blank = sum(g[i] for g in self.gaps.values()) * 2 > len(self.gaps)
+            out.append(("\n" if blank else "") + line)
+        return "\n".join(out)
 
 
 def _norm(line: str) -> str:
@@ -103,21 +124,31 @@ def _description_lines(video: Video) -> list[str]:
     return [_norm(line) for line in (video.description or "").replace("\r\n", "\n").split("\n")]
 
 
-def _runs(lines: Sequence[str], repeated: set[str]) -> list[list[str]]:
-    runs: list[list[str]] = []
-    current: list[str] = []
+def _runs(lines: Sequence[str], repeated: set[str]) -> list[list[tuple[str, bool]]]:
+    """Runs of repeated lines; each line comes with whether a blank line sits right before it."""
+    runs: list[list[tuple[str, bool]]] = []
+    current: list[tuple[str, bool]] = []
+    blank = False
     for line in lines:
         if not line:
+            blank = True
             continue
         if line in repeated:
-            current.append(line)
+            current.append((line, blank))
         else:
             if current:
                 runs.append(current)
             current = []
+        blank = False
     if current:
         runs.append(current)
     return runs
+
+
+def placeholder_block(blocks: Sequence[TemplateBlock], name: str) -> TemplateBlock | None:
+    """The first block that still holds its placeholder text and has this name (case and spacing ignored)."""
+    wanted = " ".join(name.split()).casefold()
+    return next((b for b in blocks if is_placeholder(b) and " ".join(b.name.split()).casefold() == wanted), None)
 
 
 def _block_lines(text: str) -> tuple[str, ...]:
@@ -166,7 +197,7 @@ def scan(videos: Iterable[Video], blocks: Sequence[TemplateBlock], include_short
     has_prev: dict[str, set[str]] = defaultdict(set)
     for vid, vruns in runs.items():
         for run in vruns:
-            for a, b in zip(run, run[1:]):
+            for (a, _), (b, _) in zip(run, run[1:]):
                 pair[(a, b)].add(vid)
                 has_next[a].add(vid)
                 has_prev[b].add(vid)
@@ -182,9 +213,10 @@ def scan(videos: Iterable[Video], blocks: Sequence[TemplateBlock], include_short
         for run in vruns:
             start = 0
             for i in range(1, len(run) + 1):
-                if i == len(run) or not joins(run[i - 1], run[i]):
-                    lines = tuple(run[start:i])
-                    pieces.setdefault(lines, _Piece(lines)).videos.add(vid)
+                if i == len(run) or not joins(run[i - 1][0], run[i][0]):
+                    lines = tuple(line for line, _ in run[start:i])
+                    gaps = tuple(blank for _, blank in run[start + 1:i])
+                    pieces.setdefault(lines, _Piece(lines)).add(vid, gaps)
                     start = i
 
     kept = sorted((p for p in pieces.values() if len(p.videos) >= need),
@@ -203,15 +235,19 @@ def scan(videos: Iterable[Video], blocks: Sequence[TemplateBlock], include_short
     for block in blocks:
         if is_placeholder(block):
             continue
-        for text in (block.text, *block.old_versions):
+        for text in (block.text, *real_old_versions(block)):
             existing.setdefault(_block_lines(text), block.name)
 
     candidates: list[Candidate] = []
     used: dict[str, int] = defaultdict(int)
     numbered = 0
     for main, older in groups:
-        text = "\n".join(main.lines)
+        text = main.text()
         already = existing.get(main.lines, "")
+        already_older = False
+        if not already:
+            already = next((existing[p.lines] for p in older if p.lines in existing), "")
+            already_older = bool(already)
         name = _suggest(text)
         disclosure = name == DISCLOSURE_NAME
         if not name:
@@ -223,11 +259,11 @@ def scan(videos: Iterable[Video], blocks: Sequence[TemplateBlock], include_short
                 name = f"{name} {used[name]}"
         has_urls = seo.has_url(text)
         candidates.append(Candidate(
-            key=make_key(text), text=text, line_count=len(main.lines), video_count=len(main.videos),
+            key=make_key("\n".join(main.lines)), text=text, line_count=len(main.lines), video_count=len(main.videos),
             share=len(main.videos) / total,
             examples=tuple(sorted(main.videos, key=views.__getitem__)[:3]),
-            versions=tuple(("\n".join(p.lines), len(p.videos)) for p in older),
-            has_urls=has_urls, already=already, suggested_name=name,
+            versions=tuple((p.text(), len(p.videos)) for p in older),
+            has_urls=has_urls, already=already, already_older=already_older, suggested_name=name,
             suggested_link_slot=disclosure and not has_urls))
     return BuildResult(candidates[:MAX_CANDIDATES], len(candidates), total)
 

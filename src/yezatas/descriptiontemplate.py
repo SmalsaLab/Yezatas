@@ -65,9 +65,20 @@ NO_TEMPLATE_YET = "No description template yet."
 _PLACEHOLDER_KEYS = frozenset(" ".join(text.split()) for text in STARTER_PLACEHOLDERS.values())
 
 
+def is_placeholder_text(text: str) -> bool:
+    """`text` is one of the starter placeholder texts (whitespace aside)."""
+    return " ".join(text.split()) in _PLACEHOLDER_KEYS
+
+
 def is_placeholder(block: TemplateBlock) -> bool:
     """The block still holds a starter placeholder text (whitespace aside), so it is not set up yet."""
-    return " ".join(block.text.split()) in _PLACEHOLDER_KEYS
+    return is_placeholder_text(block.text)
+
+
+def real_old_versions(block: TemplateBlock) -> tuple[str, ...]:
+    """The block's old versions without starter placeholder texts: a placeholder that was replaced was never
+    on a video, so it is not looked for and does not count as an old version."""
+    return tuple(text for text in block.old_versions if not is_placeholder_text(text))
 
 
 def _real_blocks(blocks: Sequence[TemplateBlock]) -> list[TemplateBlock]:
@@ -248,7 +259,7 @@ def _find_hits(lines: list[str], blocks: Sequence[TemplateBlock]) -> tuple[list[
         # every version is scanned, the current text first so it wins lines it shares with an old one;
         # the first copy in line order is the block's hit, later copies (of any version) are extras
         runs: list[tuple[tuple[int, ...], bool]] = []
-        for version, text in enumerate((block.text, *block.old_versions)):
+        for version, text in enumerate((block.text, *real_old_versions(block))):
             want = _block_target(text)
             if want:
                 runs.extend((run, version > 0) for run in _scan(texts, filled, want, taken))

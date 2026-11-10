@@ -288,7 +288,7 @@ def build_templates_page(videos: Sequence[Video], blocks: Sequence[TemplateBlock
         for s in t.sections:
             if s.get("kind") == "block":
                 used_by.setdefault(int(s["block_id"]), []).append((t.id, t.name))
-    block_views = tuple(BlockView(b.id, b.name, b.text, b.link_slot, len(b.old_versions),
+    block_views = tuple(BlockView(b.id, b.name, b.text, b.link_slot, len(dt.real_old_versions(b)),
                                   tuple(name for _, name in used_by.get(b.id, ())), dt.is_placeholder(b))
                         for b in blocks)
 

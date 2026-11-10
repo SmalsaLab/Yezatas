@@ -20,6 +20,8 @@ class BuildCard:
     examples: list[tuple[str, str]]  # (video id, title)
     versions: list[tuple[str, str]]  # (text, "On 3 videos")
     already: str
+    already_older: bool  # only an older version is that block's text
+    fills: str  # the placeholder block this name would fill, or ""
     name: str  # prefilled: the suggestion, or what was typed before a refusal
     link_slot: bool
     remember: bool
@@ -33,6 +35,7 @@ class BuildPage:
     found: int  # before the cap
     shown: int
     added: str  # the block just added, or ""
+    filled: bool  # it was a placeholder block that got filled
 
 
 def _on(count: int, total: int | None = None) -> str:
@@ -46,12 +49,14 @@ def build_page(videos: Sequence[Video], result: templatebuild.BuildResult, block
     cards = []
     for c in result.candidates:
         kept = typed.get(f"build:{c.key}")
+        name = kept["name"] if kept else c.suggested_name
+        fills = templatebuild.placeholder_block(blocks, name)
         cards.append(BuildCard(
             key=c.key, text=c.text, on_text=_on(c.video_count, result.videos_read),
             examples=[(vid, titles.get(vid) or vid) for vid in c.examples],
             versions=[(text, _on(count)) for text, count in c.versions],
-            already=c.already,
-            name=kept["name"] if kept else c.suggested_name,
+            already=c.already, already_older=c.already_older, fills=fills.name if fills else "",
+            name=name,
             link_slot=(kept.get("link_slot") == "1") if kept else c.suggested_link_slot,
             remember=(kept.get("remember") == "1") if kept else True))
     added = ""
@@ -59,4 +64,4 @@ def build_page(videos: Sequence[Video], result: templatebuild.BuildResult, block
     if raw.isdigit():
         added = next((b.name for b in blocks if b.id == int(raw)), "")
     return BuildPage(has_videos=bool(videos), videos_read=result.videos_read, cards=cards, found=result.found,
-                     shown=len(result.candidates), added=added)
+                     shown=len(result.candidates), added=added, filled=bool(added) and query.get("filled") == "1")

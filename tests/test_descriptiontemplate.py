@@ -743,3 +743,18 @@ def test_judge_catalog_after_the_starter_does_not_drop_videos_to_zero(store: Sto
     judgments, own = judge_catalog(store, [video])
     assert judgments["v1"].points == 10 and judgments["v1"].not_set_up == ("Paid links", "Support and follow")
     assert own == {}
+
+
+# --- a filled placeholder block: the placeholder left in its old versions is never matched -------------------
+
+def test_placeholder_old_versions_are_not_looked_for() -> None:
+    from yezatas.descriptiontemplate import STARTER_PLACEHOLDERS, find_block_lines, real_old_versions
+    from yezatas.store import TemplateBlock
+    placeholder = STARTER_PLACEHOLDERS["Paid links"]
+    real = "Some links are affiliate links."
+    filled = TemplateBlock(id=1, name="Paid links", text=real, old_versions=("Older paid text.", placeholder),
+                           link_slot=False)
+    assert real_old_versions(filled) == ("Older paid text.",)
+    assert find_block_lines(f"My garden.\n{placeholder}", [filled]) == frozenset()
+    assert find_block_lines("My garden.\nOlder paid text.", [filled]) == frozenset({2})
+    assert find_block_lines(f"My garden.\n{real}", [filled]) == frozenset({2})

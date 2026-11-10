@@ -101,7 +101,8 @@ def test_adjacent_lines_with_blank_lines_between_form_one_block() -> None:
     text = "Support the garden:\n\n\nhttps://example.com/garden\n\nThank you!"
     videos = [video(i, f"{own(i)}\n\n{text}") for i in range(4)]
     cands = tb.find_candidates(videos, [])
-    assert texts(cands) == ["Support the garden:\nhttps://example.com/garden\nThank you!"]
+    # blank lines are kept the way the videos have them, at most one per gap
+    assert texts(cands) == ["Support the garden:\n\nhttps://example.com/garden\n\nThank you!"]
     assert cands[0].line_count == 3
 
 
@@ -187,7 +188,8 @@ def test_same_input_gives_the_same_output_and_stable_keys() -> None:
     first = tb.find_candidates(videos, [])
     again = tb.find_candidates(list(reversed(videos)), [])
     assert first == again
-    assert [c.key for c in first] == [tb.make_key(c.text) for c in first]
+    # the key is made from the non-blank lines
+    assert [c.key for c in first] == [tb.make_key("\n".join(t for t in c.text.split("\n") if t)) for c in first]
     assert len({c.key for c in first}) == len(first)
     assert all(len(c.key) == tb.KEY_LENGTH for c in first)
 
@@ -244,3 +246,87 @@ def test_an_empty_catalog() -> None:
     result = tb.scan([], [])
     assert (result.candidates, result.found, result.videos_read) == ([], 0, 0)
     assert tb.find_candidates([video(1, ""), video(2, "\n\n"), video(3, "")], []) == []
+
+
+# --- older version already in the library (decision: counts as already added) ---------------------------------
+
+def test_already_when_only_an_older_version_is_a_block() -> None:
+    videos = ([video(i, f"{own(i)}\n\n{SUPPORT_NEW}") for i in range(7)]
+              + [video(i, f"{own(i)}\n\n{SUPPORT_OLD}") for i in range(7, 10)])
+    (cand,) = tb.find_candidates(videos, [block(1, "Support", SUPPORT_OLD)])
+    assert cand.text == SUPPORT_NEW
+    assert cand.already == "Support" and cand.already_older
+    # an old version of the block counts too
+    (cand,) = tb.find_candidates(videos, [block(1, "Support", "Other text", old=(SUPPORT_OLD,))])
+    assert cand.already == "Support" and cand.already_older
+    # the main text wins: not "older"
+    (cand,) = tb.find_candidates(videos, [block(1, "Support", SUPPORT_NEW)])
+    assert cand.already == "Support" and not cand.already_older
+    # a placeholder never counts, not even as an older match
+    placeholder = STARTER_PLACEHOLDERS["Support and follow"]
+    (cand,) = tb.find_candidates(videos, [block(1, "Support and follow", placeholder)])
+    assert cand.already == "" and not cand.already_older
+
+
+def test_placeholder_old_versions_do_not_count_as_existing() -> None:
+    placeholder = STARTER_PLACEHOLDERS["Paid links"]
+    videos = [video(i, f"{own(i)}\n{placeholder}") for i in range(4)]
+    (cand,) = tb.find_candidates(videos, [block(1, "Paid links", PAID, old=(placeholder,))])
+    assert cand.already == ""
+
+
+# --- filling a placeholder (decision: the candidate fills the block of that name) ------------------------------
+
+def test_placeholder_block_by_name_ignores_case_and_spacing() -> None:
+    blocks = [block(1, "Paid links", PAID),
+              block(2, "Paid  Links", STARTER_PLACEHOLDERS["Paid links"]),
+              block(3, "Support and follow", STARTER_PLACEHOLDERS["Support and follow"])]
+    assert tb.placeholder_block(blocks, "  paid LINKS ").id == 2
+    assert tb.placeholder_block(blocks, "Support and follow").id == 3
+    assert tb.placeholder_block(blocks, "Seeds") is None
+    assert tb.placeholder_block([block(1, "Paid links", PAID)], "Paid links") is None
+
+
+def test_a_placeholder_with_the_suggested_name_does_not_number_it() -> None:
+    videos = [video(i, f"{own(i)}\n{PAID}") for i in range(3)]
+    (cand,) = tb.find_candidates(videos, [block(1, "Paid links", STARTER_PLACEHOLDERS["Paid links"])])
+    assert cand.suggested_name == "Paid links"
+
+
+# --- blank lines inside a block (decision: kept the way most videos have them) ----------------------------------
+
+def test_a_gap_gets_one_blank_line_when_more_than_half_have_one() -> None:
+    with_blank = "Seeds I use:\n\n\n\nGreen Row heirloom tomatoes"
+    videos = ([video(i, f"{own(i)}\n{with_blank}") for i in range(3)]
+              + [video(i, f"{own(i)}\n{SEEDS}") for i in range(3, 5)])
+    (cand,) = tb.find_candidates(videos, [])
+    assert cand.text == "Seeds I use:\n\nGreen Row heirloom tomatoes"
+    assert cand.video_count == 5 and cand.line_count == 2
+
+
+def test_exactly_half_with_a_blank_line_gives_none() -> None:
+    videos = ([video(i, f"{own(i)}\nSeeds I use:\n\nGreen Row heirloom tomatoes") for i in range(2)]
+              + [video(i, f"{own(i)}\n{SEEDS}") for i in range(2, 4)])
+    (cand,) = tb.find_candidates(videos, [])
+    assert cand.text == SEEDS
+
+
+def test_each_gap_is_decided_on_its_own_and_the_key_ignores_blank_lines() -> None:
+    three = "Seeds I use:\n\nGreen Row heirloom tomatoes\nBlue Hill bush beans"
+    videos = [video(i, f"{own(i)}\n{three}") for i in range(4)]
+    (cand,) = tb.find_candidates(videos, [])
+    assert cand.text == three
+    flat = [video(i, f"{own(i)}\n{three.replace(chr(10) * 2, chr(10))}") for i in range(4)]
+    (same,) = tb.find_candidates(flat, [])
+    assert same.text != cand.text and same.key == cand.key
+
+
+def test_versions_keep_their_own_blank_lines_and_match_without_them() -> None:
+    new = "Support the garden:\n\nhttps://example.com/garden-new"
+    videos = ([video(i, f"{own(i)}\n\n{new}") for i in range(7)]
+              + [video(i, f"{own(i)}\n\n{SUPPORT_OLD}") for i in range(7, 10)])
+    (cand,) = tb.find_candidates(videos, [])
+    assert cand.text == new and cand.versions == ((SUPPORT_OLD, 3),)
+    # a block stored without the blank line still matches
+    (cand,) = tb.find_candidates(videos, [block(1, "Support", SUPPORT_NEW)])
+    assert cand.already == "Support" and not cand.already_older

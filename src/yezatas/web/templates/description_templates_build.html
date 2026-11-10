@@ -7,7 +7,7 @@
 <p class="tp-back"><a href="{{ base }}">Description templates</a></p>
 <h1 class="page-title">Build from my channel</h1>
 <p class="intro" id="build-about">Text that repeats across your descriptions, offered as shared blocks you can add with one click. Your descriptions are not changed.</p>
-{% if bp.added %}<p class="flash ok" role="status" id="build-added">Added {{ bp.added }} as a shared block. <a href="{{ base }}#blocks">Open Shared blocks</a></p>{% endif %}
+{% if bp.added %}<p class="flash ok" role="status" id="build-added">{% if bp.filled %}Filled your shared block {{ bp.added }} with this text.{% else %}Added {{ bp.added }} as a shared block.{% endif %} <a href="{{ base }}#blocks">Open Shared blocks</a></p>{% endif %}
 
 {% if not bp.has_videos %}
 <section class="empty-state" id="build-no-videos" aria-labelledby="h-build-no-videos">
@@ -29,7 +29,7 @@
   <section class="card tp-build-card" id="build-{{ c.key }}" aria-labelledby="h-build-{{ c.key }}">
     <div class="tp-head">
       <h2 class="tp-h3" id="h-build-{{ c.key }}">{{ c.on_text }}</h2>
-      {% if c.already %}<span class="pill done" id="build-{{ c.key }}-already">Added as {{ c.already }}</span>{% endif %}
+      {% if c.already and not c.already_older %}<span class="pill done" id="build-{{ c.key }}-already">Added as {{ c.already }}</span>{% endif %}
     </div>
     <pre class="tp-block-text">{{ c.text }}</pre>
     {% if c.examples %}
@@ -46,7 +46,13 @@
       </ul>
     </div>
     {% endif %}
+    {% if c.already_older %}
+    <p class="hint" id="build-{{ c.key }}-older">An older version of this text is your shared block {{ c.already }}. Most of these videos carry this newer version. To use it, change the block's text under <a href="{{ base }}#blocks">Shared blocks</a>.</p>
+    {% endif %}
     {% if not c.already %}
+    {% if c.fills %}
+    <p class="hint" id="build-{{ c.key }}-fills">Added under this name, it fills your shared block {{ c.fills }}, which still has its placeholder text.</p>
+    {% endif %}
     <form class="edit-form" method="post" action="{{ base }}/build/add">
       <input type="hidden" name="csrf" value="{{ csrf }}">
       <input type="hidden" name="key" value="{{ c.key }}">

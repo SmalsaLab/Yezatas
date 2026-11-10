@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from webhelpers import Ui, make_ui, make_video, seed_catalog
-from yezatas import templatebuild
+from yezatas import descriptiontemplate, templatebuild
 from yezatas.store import Store
 
 URL = "/description-templates/build"
@@ -233,3 +233,119 @@ def test_the_two_links_on_the_main_page(tmp_path: Path) -> None:
     assert 'id="tp-empty"' not in full
     blocks = full[full.index('id="blocks"'):]
     assert link in blocks[:blocks.index("</section>")]
+
+
+# --- filling a starter placeholder ---------------------------------------------------------------------------------
+
+def start_main(ui: Ui) -> dict[str, Any]:
+    """The suggested template "Main", whose two shared blocks still hold their placeholder text."""
+    ui.post("/description-templates/start")
+    return {b.name: b for b in blocks_of(ui)}
+
+
+def test_the_card_says_it_will_fill_the_placeholder(tmp_path: Path) -> None:
+    ui = make_build_ui(tmp_path)
+    start_main(ui)
+    page = get(ui)
+    paid = page[page.index(f'id="build-{key_of(PAID)}"'):]
+    paid = paid[:paid.index("</section>")]
+    assert 'value="Paid links"' in paid  # not "Paid links 2"
+    assert "Added under this name, it fills your shared block Paid links, which still has its placeholder text." \
+        in paid
+
+
+def test_adding_fills_the_placeholder_block(tmp_path: Path) -> None:
+    ui = make_build_ui(tmp_path)
+    before = start_main(ui)
+    paid_id = before["Paid links"].id
+    resp = add(ui, key_of(PAID), name="  paid   LINKS ")
+    assert resp.status_code == 303
+    assert resp.headers["location"] == f"{URL}?added={paid_id}&filled=1#build-{key_of(PAID)}"
+    after = {b.id: b for b in blocks_of(ui)}
+    assert sorted(after) == sorted(b.id for b in before.values())  # no new block
+    filled = after[paid_id]
+    assert filled.name == "Paid links" and filled.text == PAID
+    assert not filled.link_slot  # from the form: the box was unticked
+    assert "Filled your shared block Paid links with this text." in get(ui, f"?added={paid_id}&filled=1")
+    with Store(ui.config.catalog_db) as store:
+        (main,) = store.list_description_templates()
+    assert {"kind": "block", "block_id": paid_id} in [dict(s) for s in main.sections]
+
+
+def test_filling_remembers_older_versions_and_hides_the_placeholder(tmp_path: Path) -> None:
+    ui = make_build_ui(tmp_path)
+    support_id = start_main(ui)["Support and follow"].id
+    add(ui, key_of(SUPPORT_NEW), name="Support and follow", remember="1", link_slot="1")
+    block = next(b for b in blocks_of(ui) if b.id == support_id)
+    assert block.text == SUPPORT_NEW and block.link_slot
+    assert block.old_versions[:2] == (SUPPORT_OLD, SUPPORT_OLDEST)
+    # the main page counts only the real old versions
+    main = html_mod.unescape(ui.client.get("/description-templates").text)
+    assert f'<span id="block-{support_id}-old">2 old versions</span>' in main
+
+
+def test_a_filled_block_is_found_on_the_videos(tmp_path: Path) -> None:
+    ui = make_build_ui(tmp_path)
+    paid_id = start_main(ui)["Paid links"].id
+    add(ui, key_of(PAID), name="Paid links")
+    with Store(ui.config.catalog_db) as store:
+        judgments, _ = descriptiontemplate.judge_catalog(store, store.list_videos())
+        (main,) = store.list_description_templates()
+        blocks = store.list_template_blocks()
+        report = descriptiontemplate.parse_description(store.get_video("vid000001").description, main, blocks,
+                                                       store.get_video("vid000001"))
+    states = {s.block_id: s.state for s in report.sections if s.kind == "block"}
+    assert states[paid_id] == descriptiontemplate.OK
+    assert judgments["vid000001"] is not None
+
+
+def test_a_different_name_adds_a_new_block_and_leaves_the_placeholder(tmp_path: Path) -> None:
+    ui = make_build_ui(tmp_path)
+    before = start_main(ui)
+    add(ui, key_of(PAID), name="Disclosure")
+    after = {b.name: b for b in blocks_of(ui)}
+    assert after["Paid links"].text == before["Paid links"].text
+    assert after["Disclosure"].text == PAID
+
+
+# --- an older version that is already a block ------------------------------------------------------------------------
+
+def test_an_older_version_already_in_the_library_is_information_only(tmp_path: Path) -> None:
+    ui = make_build_ui(tmp_path)
+    with Store(ui.config.catalog_db) as store:
+        store.add_template_block("Garden support", SUPPORT_OLD)
+    page = get(ui)
+    card = page[page.index(f'id="build-{key_of(SUPPORT_NEW)}"'):]
+    card = card[:card.index("</section>")]
+    assert ("An older version of this text is your shared block Garden support. Most of these videos carry this "
+            "newer version. To use it, change the block's text under") in card
+    assert "Add as shared block" not in card and "Added as" not in card
+    add(ui, key_of(SUPPORT_NEW), name="Support again")
+    assert [b.name for b in blocks_of(ui)] == ["Garden support"]
+    assert "An older version of that text is already the shared block Garden support." in get(ui)
+
+
+# --- blank lines inside a block --------------------------------------------------------------------------------------
+
+def test_blank_lines_are_stored_and_the_block_is_still_found(tmp_path: Path) -> None:
+    seeds = "Seeds I use this year:\n\nGreen Row heirloom tomatoes"
+    videos = [make_video(n, title=f"Bed {n}", description=f"{own(n)}\n\n{seeds}", duration="PT6M",
+                         privacy_status="public") for n in range(1, 5)]
+    videos.append(make_video(5, title="Bed 5", duration="PT6M", privacy_status="public",
+                             description=f"{own(5)}\n\nSeeds I use this year:\nGreen Row heirloom tomatoes"))
+    ui = make_build_ui(tmp_path, videos)
+    key = key_of("Seeds I use this year:\nGreen Row heirloom tomatoes")
+    assert "Seeds I use this year:\n\nGreen Row heirloom tomatoes</pre>" in get(ui)
+    add(ui, key, name="Seeds")
+    (block,) = blocks_of(ui)
+    assert block.text == seeds
+    with Store(ui.config.catalog_db) as store:
+        tid = store.add_description_template("Beds", [{"kind": "opening"}, {"kind": "block", "block_id": block.id}],
+                                             is_default=True)
+        template = store.get_description_template(tid)
+        for n in (1, 5):  # with and without the blank line
+            v = store.get_video(f"vid{n:06d}")
+            report = descriptiontemplate.parse_description(v.description, template, [block], v)
+            assert [s.state for s in report.sections if s.kind == "block"] == [descriptiontemplate.OK]
+    preview = html_mod.unescape(ui.client.get(f"/description-templates?template={tid}&video=vid000001").text)
+    assert '<div class="tp-line block">Seeds I use this year:</div>' in preview

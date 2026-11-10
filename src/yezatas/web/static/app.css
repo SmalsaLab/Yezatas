@@ -1413,3 +1413,19 @@ a.tp-stat.warn:hover { border-color: var(--warn); }
   .tp-blocks-link { margin-left: 0; }
   .tp-pick { flex-wrap: wrap; }
 }
+/* Build from my channel: repeated description text as candidate shared blocks */
+.tp-back { margin: 0 0 4px; font-size: var(--fs-sm); }
+.tp-build { display: grid; gap: 16px; margin-top: 12px; }
+.tp-build-card .tp-head { justify-content: space-between; }
+.tp-build-card .tp-head h2 { margin: 0; font-size: var(--fs-md); }
+.tp-build-card pre.tp-block-text { margin-top: 0; }
+.tp-build-examples a { overflow-wrap: anywhere; }
+.tp-build-versions { margin: 8px 0 12px; padding-top: 8px; border-top: 1px solid var(--line); }
+.tp-build-versions ul { margin: 0; padding: 0; list-style: none; }
+.tp-build-versions li { margin: 0 0 8px; }
+.tp-build-versions pre.tp-block-text { margin: 4px 0 0; color: var(--muted); }
+.tp-build-card .check-label { display: flex; margin: 0 0 8px; }
+@media (max-width: 640px) {
+  .tp-build-card .tp-head { justify-content: flex-start; }
+  .tp-build-card .actions .button { width: 100%; }
+}

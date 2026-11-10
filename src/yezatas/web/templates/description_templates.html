@@ -18,6 +18,7 @@
     <input type="hidden" name="csrf" value="{{ csrf }}">
     <button type="submit" class="button primary">Start with the suggested template</button>
   </form>
+  <p><a class="button secondary" id="tp-build-empty" href="{{ base }}/build">Build from my channel</a></p>
   <p class="hint">It adds one template, "Main", and the shared blocks {{ tp.starter_blocks|join(" and ") }} with placeholder text for you to replace.</p>
 </section>
 {% else %}
@@ -295,6 +296,7 @@
 <section class="card tp-blocks" id="blocks" aria-labelledby="h-blocks">
   <h2 id="h-blocks">Shared blocks</h2>
   <p class="muted">Written once and repeated on every video whose template uses them. When you change a block's text, the old text is remembered, so videos that still carry it show as out of date instead of missing.</p>
+  <p><a class="button secondary" id="tp-build-blocks" href="{{ base }}/build">Build from my channel</a></p>
   {% for b in tp.blocks %}
   {% set bt = typed.get("blocks:" ~ b.id, {}) %}
   <div class="tp-block" id="block-{{ b.id }}">

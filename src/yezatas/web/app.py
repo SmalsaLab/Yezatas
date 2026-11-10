@@ -60,6 +60,7 @@ from .. import bulkagent as bulkagent_mod
 from .. import comments as comments_mod
 from .. import customchecks as customchecks_mod
 from .. import descriptiontemplate as descriptiontemplate_mod
+from .. import templatebuild as templatebuild_mod
 from .. import glossary as glossary_mod
 from .. import replytemplates as replytemplates_mod
 from .. import postreply as postreply_mod
@@ -71,6 +72,7 @@ from .video_analytics_view import build_video_analytics
 from .category_view import build_category_view
 from .pinned_view import build_pinned_view
 from . import template_view as template_view_mod
+from . import template_build_view as template_build_view_mod
 from .nav_counts import build_nav_counts
 from ..store import AdCheck, CategoryCheck, OutlierReport, PinnedComment, ShortsFind, Store, ThumbnailVariant
 from ..subtitles import to_srt
@@ -4193,6 +4195,61 @@ def create_app(
                                                       playlists, judgments, dict(request.query_params),
                                                       pop_typed(request))
         return render(request, "description_templates.html", {"active": "description_templates", "tp": view})
+
+    # --- Build from my channel (phase 2b): repeated description text offered as shared blocks -----------
+    def build_scan(store: Store) -> tuple[list[Any], Any]:
+        videos = store.list_videos()
+        return videos, templatebuild_mod.scan(videos, store.list_template_blocks(),
+                                              store.templates_include_shorts())
+
+    @app.get(template_build_view_mod.BUILD_URL)
+    def description_templates_build_page(request: Request) -> Response:
+        with Store(config.catalog_db) as store:
+            videos, result = build_scan(store)
+            blocks = store.list_template_blocks()
+        view = template_build_view_mod.build_page(videos, result, blocks, dict(request.query_params),
+                                                  pop_typed(request))
+        return render(request, "description_templates_build.html",
+                      {"active": "description_templates", "bp": view})
+
+    @app.post(template_build_view_mod.BUILD_URL + "/add")
+    async def description_templates_build_add(request: Request) -> Response:
+        form = await read_form(request)
+        key = str(form.get("key") or "")
+        typed = {k: str(form.get(k) or "") for k in ("name", "link_slot", "remember")}
+        back = template_build_view_mod.BUILD_URL
+
+        def run() -> tuple[str, str, str]:
+            with Store(config.catalog_db) as store:
+                _, result = build_scan(store)
+                found = next((c for c in result.candidates if c.key == key), None)
+                if found is None:
+                    return "error", "That text is no longer repeated on your videos.", back
+                if found.already:
+                    return "info", f"That text is already the shared block {found.already}.", back + f"#build-{key}"
+                # The server's own text, never the form's. Older versions go in first, least carried first (the
+                # reverse of the order shown), so the store keeps them newest first; the main text goes in last.
+                texts = [found.text]
+                if typed["remember"] == "1":
+                    texts = [text for text, _ in reversed(found.versions)] + texts
+                try:
+                    block_id = store.add_template_block(typed["name"], texts[0], link_slot=typed["link_slot"] == "1")
+                except ValueError as exc:
+                    return "error", str(exc), back + f"#build-{key}"
+                try:
+                    for text in texts[1:]:
+                        store.update_template_block(block_id, text=text)
+                except ValueError as exc:
+                    store.delete_template_block(block_id)
+                    return "error", str(exc), back + f"#build-{key}"
+                return "ok", "", back + f"?added={block_id}#build-{key}"
+
+        kind, message, target = await run_in_threadpool(run)
+        if kind == "error":
+            keep_typed(request, f"build:{key}", typed)
+        if message:
+            flash(request, kind, message)
+        return see_other(target)
 
     @app.post(template_view_mod.PAGE_URL + "/start")
     async def start_description_templates(request: Request) -> Response:

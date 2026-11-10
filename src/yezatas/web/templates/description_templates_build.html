@@ -1,0 +1,68 @@
+{% extends "shell.html" %}
+{# Build from my channel. `bp` is web/template_build_view.BuildPage. Text that repeats across the catalog's
+   descriptions, offered as shared blocks. Plain forms; nothing here changes a description or reaches YouTube. #}
+{% block title %}Build from my channel - Yezatas{% endblock %}
+{% block content %}
+{% set base = "/description-templates" %}
+<p class="tp-back"><a href="{{ base }}">Description templates</a></p>
+<h1 class="page-title">Build from my channel</h1>
+<p class="intro" id="build-about">Text that repeats across your descriptions, offered as shared blocks you can add with one click. Your descriptions are not changed.</p>
+{% if bp.added %}<p class="flash ok" role="status" id="build-added">Added {{ bp.added }} as a shared block. <a href="{{ base }}#blocks">Open Shared blocks</a></p>{% endif %}
+
+{% if not bp.has_videos %}
+<section class="empty-state" id="build-no-videos" aria-labelledby="h-build-no-videos">
+  <h2 id="h-build-no-videos">No videos yet</h2>
+  <p class="muted">Your catalog has no videos yet. Pull your channel first.</p>
+  <p><a class="button secondary" href="/configuration#step-pull">Open Configuration</a></p>
+</section>
+{% elif not bp.cards %}
+<section class="empty-state" id="build-none" aria-labelledby="h-build-none">
+  <h2 id="h-build-none">Nothing repeats yet</h2>
+  <p class="muted">No text repeats on enough of your videos yet. Read {{ bp.videos_read }} {{ "video" if bp.videos_read == 1 else "videos" }}.</p>
+</section>
+{% else %}
+<p class="muted" id="build-read">Read {{ bp.videos_read }} {{ "video" if bp.videos_read == 1 else "videos" }}.
+  {% if bp.found > bp.shown %}<span id="build-more">Showing the {{ bp.shown }} found on the most videos, of {{ bp.found }}.</span>{% endif %}</p>
+
+<div class="tp-build" id="build-candidates">
+  {% for c in bp.cards %}
+  <section class="card tp-build-card" id="build-{{ c.key }}" aria-labelledby="h-build-{{ c.key }}">
+    <div class="tp-head">
+      <h2 class="tp-h3" id="h-build-{{ c.key }}">{{ c.on_text }}</h2>
+      {% if c.already %}<span class="pill done" id="build-{{ c.key }}-already">Added as {{ c.already }}</span>{% endif %}
+    </div>
+    <pre class="tp-block-text">{{ c.text }}</pre>
+    {% if c.examples %}
+    <p class="hint tp-build-examples">For example:
+      {% for vid, title in c.examples %}<a href="/videos/{{ vid }}">{{ title }}</a>{% if not loop.last %}, {% endif %}{% endfor %}</p>
+    {% endif %}
+    {% if c.versions %}
+    <div class="tp-build-versions" id="build-{{ c.key }}-versions">
+      <h3 class="tp-h3">Older versions</h3>
+      <ul>
+        {% for text, on in c.versions %}
+        <li><span class="hint">{{ on }}</span><pre class="tp-block-text">{{ text }}</pre></li>
+        {% endfor %}
+      </ul>
+    </div>
+    {% endif %}
+    {% if not c.already %}
+    <form class="edit-form" method="post" action="{{ base }}/build/add">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <input type="hidden" name="key" value="{{ c.key }}">
+      <div class="field">
+        <label for="build-name-{{ c.key }}">Name</label>
+        <input type="text" id="build-name-{{ c.key }}" name="name" value="{{ c.name }}" autocomplete="off" maxlength="100">
+      </div>
+      <label class="check-label"><input type="checkbox" name="link_slot" value="1"{% if c.link_slot %} checked{% endif %}> The links right below this are each video's own</label>
+      {% if c.versions %}
+      <label class="check-label"><input type="checkbox" name="remember" value="1"{% if c.remember %} checked{% endif %}> Remember the older versions, so videos that carry them show as out of date</label>
+      {% endif %}
+      <div class="actions"><button type="submit" class="button primary">Add as shared block</button></div>
+    </form>
+    {% endif %}
+  </section>
+  {% endfor %}
+</div>
+{% endif %}
+{% endblock %}

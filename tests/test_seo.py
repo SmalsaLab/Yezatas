@@ -714,6 +714,34 @@ def test_template_check_too_little_to_check_the_order():
     assert result.fix == "Add Paid links."
 
 
+def test_template_check_says_which_blocks_are_not_set_up_and_never_asks_to_add_them():
+    video = make_video()
+    mixed = TemplateJudgment(template_name="Main", fixed_points=7, order_ok=True, blocks_total=1,
+                             blocks_current=1, not_set_up=("Paid links",))
+    result = check(video, "description_template", template_ctx(video, mixed))
+    assert result.points == 10 and result.fix == ""
+    assert result.detail == 'Follows "Main": 1 of 1 shared blocks current; Paid links is not set up yet.'
+    missing = replace(mixed, fixed_points=0, blocks_current=0, missing=("Support and follow",))
+    result = check(video, "description_template", template_ctx(video, missing))
+    assert result.detail == ('Follows "Main": 0 of 1 shared blocks current; Support and follow is missing; '
+                             'Paid links is not set up yet.')
+    assert result.fix == "Add Support and follow."
+
+
+def test_template_check_with_every_block_not_set_up():
+    video = make_video()
+    judgment = TemplateJudgment(template_name="Main", fixed_points=7, order_ok=True,
+                                not_set_up=("Paid links", "Support and follow"))
+    result = check(video, "description_template", template_ctx(video, judgment))
+    assert result.points == 10 and result.fix == ""
+    assert result.detail == 'Follows "Main": Paid links and Support and follow are not set up yet.'
+    result = check(video, "description_template", template_ctx(video, replace(judgment, order_ok=False)))
+    assert result.detail == ('Follows "Main": Paid links and Support and follow are not set up yet; too little '
+                             'of the template is there to check its order.')
+    assert result.fix == "Add more of the template's sections so its order can be checked."
+    assert "Paid links" not in result.fix
+
+
 def test_score_catalog_without_template_inputs_ignores_the_template_check():
     video = make_video()
     card_ = score_catalog([video])["v1"]

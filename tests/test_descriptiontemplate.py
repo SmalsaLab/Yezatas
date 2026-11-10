@@ -10,10 +10,10 @@ from pathlib import Path
 import pytest
 
 from yezatas import seo
-from yezatas.descriptiontemplate import (MISSING, NOT_APPLICABLE, OK, OUT_OF_DATE, STARTER_SECTIONS,
-                                         TRAY_REASON, WRONG_PLACE, assign_template, coverage,
-                                         find_block_lines, judge_catalog, judge_report, own_text_chars,
-                                         parse_description)
+from yezatas.descriptiontemplate import (MISSING, NOT_APPLICABLE, NOT_SET_UP, OK, OUT_OF_DATE,
+                                         STARTER_PLACEHOLDERS, STARTER_SECTIONS, TRAY_REASON, WRONG_PLACE,
+                                         assign_template, coverage, find_block_lines, is_placeholder,
+                                         judge_catalog, judge_report, own_text_chars, parse_description)
 from yezatas.seo import TemplateJudgment
 from yezatas.store import DescriptionTemplate, Store, TemplateBlock, Video
 
@@ -662,3 +662,84 @@ def test_starter_sections_order():
 def test_starter_sections_create_nothing(store: Store):
     judge_catalog(store, [make_video()])
     assert store.list_template_blocks() == [] and store.list_description_templates() == []
+
+
+# --- a shared block that still holds its starter placeholder is not set up, and not scored ---
+
+PAID_STARTER = replace(PAID, text=STARTER_PLACEHOLDERS["Paid links"])
+SUPPORT_STARTER = replace(SUPPORT, text=STARTER_PLACEHOLDERS["Support and follow"], old_versions=())
+
+
+def test_is_placeholder_ignores_spacing_but_not_other_text():
+    assert is_placeholder(PAID_STARTER) and is_placeholder(SUPPORT_STARTER)
+    spaced = replace(PAID, text="  Replace this with   your\npaid-links disclosure.  ")
+    assert is_placeholder(spaced)
+    assert not is_placeholder(PAID)
+    assert not is_placeholder(replace(PAID, text=STARTER_PLACEHOLDERS["Paid links"] + " Thanks!"))
+    assert not is_placeholder(replace(PAID, text=STARTER_PLACEHOLDERS["Paid links"].lower()))
+
+
+def test_a_placeholder_block_is_not_set_up_not_missing_and_not_in_the_order():
+    tpl = two_blocks()
+    blocks = [PAID_STARTER, SUPPORT]
+    # the placeholder text sits in the description, even out of place: it is still not looked for
+    text = doc(OPENING, SUPPORT.text, PAID_STARTER.text, HASHTAGS)
+    report = parse(text, tpl, blocks)
+    paid = section(report, "block:1")
+    assert (paid.state, paid.lines, paid.in_order) == (NOT_SET_UP, (), True)
+    assert states(report) == {"opening": OK, "block:1": NOT_SET_UP, "block:2": OK, "hashtags": OK}
+    j = judge_report(tpl, report)
+    assert j.not_set_up == ("Paid links",)
+    assert (j.blocks_total, j.blocks_current, j.missing, j.wrong_place) == (1, 1, (), ())
+    assert (j.fixed_points, j.order_ok, j.points) == (7, True, 10)
+
+
+def test_a_placeholder_mixed_with_a_missing_real_block():
+    tpl = two_blocks()
+    j = judge_report(tpl, parse(doc(OPENING, HASHTAGS), tpl, [PAID_STARTER, SUPPORT]))
+    assert (j.blocks_total, j.missing, j.not_set_up) == (1, ("Support and follow",), ("Paid links",))
+    assert j.fixed_points == 0
+    assert not j.order_ok  # no real block found
+
+
+def test_a_placeholder_mixed_with_an_old_version():
+    tpl = two_blocks()
+    j = judge_report(tpl, parse(doc(OPENING, OLD_SUPPORT, HASHTAGS), tpl, [PAID_STARTER, SUPPORT]))
+    assert (j.blocks_total, j.out_of_date, j.fixed_points) == (1, ("Support and follow",), 3)  # floor(3.5)
+
+
+def test_all_blocks_placeholders_use_the_no_fixed_blocks_rules():
+    tpl = two_blocks()
+    blocks = [PAID_STARTER, SUPPORT_STARTER]
+    j = judge_report(tpl, parse(doc(OPENING, HASHTAGS), tpl, blocks))
+    assert (j.blocks_total, j.fixed_points, j.order_ok, j.points) == (0, 7, True, 10)
+    assert j.not_set_up == ("Paid links", "Support and follow") and j.missing == ()
+    j = judge_report(tpl, parse(OPENING, tpl, blocks))  # one section found: too little for the order
+    assert (j.fixed_points, j.order_ok, j.points) == (7, False, 7)
+
+
+def test_text_edited_away_from_the_placeholder_is_scored_again():
+    tpl = two_blocks()
+    edited = replace(PAID_STARTER, text=PAID.text, old_versions=(PAID_STARTER.text,))
+    j = judge_report(tpl, parse(doc(OPENING, SUPPORT.text, HASHTAGS), tpl, [edited, SUPPORT]))
+    assert j.not_set_up == () and j.missing == ("Paid links",) and (j.blocks_total, j.fixed_points) == (2, 3)
+    j = judge_report(tpl, parse(doc(OPENING, PAID.text, SUPPORT.text, HASHTAGS), tpl, [edited, SUPPORT]))
+    assert (j.missing, j.fixed_points, j.points) == ((), 7, 10)
+
+
+def test_find_block_lines_skips_placeholder_blocks():
+    text = doc(OPENING, PAID_STARTER.text, SUPPORT.text)
+    assert find_block_lines(text, [PAID_STARTER, SUPPORT]) == frozenset({5, 6})
+    assert find_block_lines(text, [PAID_STARTER]) == frozenset()
+
+
+def test_judge_catalog_after_the_starter_does_not_drop_videos_to_zero(store: Store):
+    paid = store.add_template_block("Paid links", STARTER_PLACEHOLDERS["Paid links"], link_slot=True)
+    support = store.add_template_block("Support and follow", STARTER_PLACEHOLDERS["Support and follow"])
+    sections = [{"kind": k} for k in ("opening", "about", "chapters", "watch_next")]
+    sections += [{"kind": "block", "block_id": paid}, {"kind": "block", "block_id": support}, {"kind": "hashtags"}]
+    store.add_description_template("Main", sections, is_default=True)
+    video = make_video("v1", description=doc(OPENING, CHAPTER_LINES, HASHTAGS))
+    judgments, own = judge_catalog(store, [video])
+    assert judgments["v1"].points == 10 and judgments["v1"].not_set_up == ("Paid links", "Support and follow")
+    assert own == {}

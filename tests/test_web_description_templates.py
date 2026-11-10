@@ -12,6 +12,7 @@ from typing import Any
 import pytest
 
 from webhelpers import Ui, make_ui, make_video, seed_catalog
+from yezatas import descriptiontemplate
 from yezatas.store import Store
 
 URL = "/description-templates"
@@ -137,6 +138,56 @@ def test_the_starter_makes_one_default_template_and_two_placeholder_blocks_once(
     assert again.status_code == 303
     assert len(templates_of(ui)) == 1 and len(blocks_of(ui)) == 2
     assert "You already have a template, so nothing was added." in page(ui)
+
+
+def test_after_the_starter_placeholder_blocks_are_not_set_up_and_cost_no_points(tmp_path: Path) -> None:
+    ui = make_dt_ui(tmp_path)
+    nf(ui, URL + "/start")
+    with store_of(ui) as store:
+        judgments, _ = descriptiontemplate.judge_catalog(store, store.list_videos())
+    followed = [j for j in judgments.values() if j.applicable]
+    assert len(followed) == 4  # every video but the Short
+    assert all(j.points >= 7 and j.missing == () for j in followed)
+    assert all(j.not_set_up == ("Paid links", "Support and follow") for j in followed)
+    html = page(ui)
+    # the preview: a neutral "Not set up" pill, never a warning
+    assert states_of(html)["Paid links"] == "Not set up" and states_of(html)["Support and follow"] == "Not set up"
+    pills = re.findall(r'<span class="pill ([^"]*)" data-state="not_set_up">Not set up</span>',
+                       section(html, "preview"))
+    assert pills == ["", ""]
+    assert 'Follows "Main": Paid links and Support and follow are not set up yet' in section(html, "preview")
+    # the section list keeps the placeholder note but counts nothing for those blocks
+    blocks = [b.id for b in blocks_of(ui)]
+    rows = section(html, "template")
+    for block_id in blocks:
+        row = rows[rows.index(f'id="section-block-{block_id}"'):]
+        row = row[:row.index("</li>")]
+        assert "Placeholder text: replace it with your own under Shared blocks." in row
+        assert '<span class="tp-sec-count"></span>' in row and "missing" not in row
+    # coverage follows the new scoring
+    full = sum(1 for j in followed if j.points == 10)
+    cover = html[html.index('id="tp-coverage"'):html.index('id="tp-chips"')]
+    def number(tile: str) -> int:
+        found = re.search(rf'id="{tile}"[^>]*><span class="tp-stat-k">[^<]*</span><span class="tp-stat-v">(\d+)</span>',
+                          cover)
+        assert found, tile
+        return int(found.group(1))
+    assert (number("tp-cover-following"), number("tp-cover-needs")) == (full, len(followed) - full)
+    assert full >= 1  # a video with only its own sections, in order, now follows fully
+
+
+def test_a_block_edited_away_from_the_placeholder_is_scored_again(tmp_path: Path) -> None:
+    ui = make_dt_ui(tmp_path)
+    nf(ui, URL + "/start")
+    support = next(b for b in blocks_of(ui) if b.name == "Support and follow")
+    nf(ui, f"{URL}/blocks/{support.id}/edit", data={"name": support.name, "text": SUPPORT})
+    html = page(ui, "?video=vid000001")
+    assert states_of(html)["Support and follow"] == "OK" and states_of(html)["Paid links"] == "Not set up"
+    html = page(ui, "?video=vid000002")
+    assert states_of(html)["Support and follow"] == "Missing"
+    row = section(html, "template")
+    row = row[row.index(f'id="section-block-{support.id}"'):]
+    assert "missing" in row[:row.index("</li>")]
 
 
 def test_the_starter_reuses_a_block_of_the_same_name(tmp_path: Path) -> None:

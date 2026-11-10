@@ -12,6 +12,8 @@ INTERFACE:
 - `judge_catalog(store, videos)` -> (judgments, own_chars), the two inputs of `seo.score_catalog`.
 - `coverage(videos, judgments, templates)` -> Coverage: how many videos follow each template.
 - `STARTER_SECTIONS`: the suggested first template, as data for the editor.
+- `STARTER_PLACEHOLDERS`, `is_placeholder(block)`: the starter blocks' text the user must replace. A block that
+  still holds it is "not set up": it is never looked for in a description and earns or costs no points.
 """
 
 from __future__ import annotations
@@ -44,14 +46,33 @@ STARTER_SECTIONS: tuple[dict[str, object], ...] = (
     {"kind": "hashtags"},
 )
 
+# The text the starter button gives each starter block, for the user to replace.
+STARTER_PLACEHOLDERS: dict[str, str] = {
+    "Paid links": "Replace this with your paid-links disclosure.",
+    "Support and follow": "Replace this with your support links.",
+}
+
 # States of a template section in a description.
-OK, MISSING, OUT_OF_DATE, WRONG_PLACE, NOT_APPLICABLE = (
-    "ok", "missing", "out_of_date", "wrong_place", "not_applicable")
+OK, MISSING, OUT_OF_DATE, WRONG_PLACE, NOT_APPLICABLE, NOT_SET_UP = (
+    "ok", "missing", "out_of_date", "wrong_place", "not_applicable", "not_set_up")
 
 TRAY_REASON = "Not in the template"
 HEADING_MAX = 60  # characters: a longer line ending in ":" is a sentence, not a heading
 
 NO_TEMPLATE_YET = "No description template yet."
+
+
+_PLACEHOLDER_KEYS = frozenset(" ".join(text.split()) for text in STARTER_PLACEHOLDERS.values())
+
+
+def is_placeholder(block: TemplateBlock) -> bool:
+    """The block still holds a starter placeholder text (whitespace aside), so it is not set up yet."""
+    return " ".join(block.text.split()) in _PLACEHOLDER_KEYS
+
+
+def _real_blocks(blocks: Sequence[TemplateBlock]) -> list[TemplateBlock]:
+    """The blocks that are looked for in descriptions: every block but the placeholders."""
+    return [b for b in blocks if not is_placeholder(b)]
 
 
 # --- Which template a video follows ---------------------------------------------------------------
@@ -137,7 +158,7 @@ class SectionState:
     kind: str  # the section kind; "block" for a shared block
     name: str  # what to call it: "Opening", ... or the block's name
     block_id: int | None
-    state: str  # OK, MISSING, OUT_OF_DATE, WRONG_PLACE or NOT_APPLICABLE
+    state: str  # OK, MISSING, OUT_OF_DATE, WRONG_PLACE, NOT_APPLICABLE or NOT_SET_UP
     in_order: bool  # False when it was found, but not where the template puts it
     lines: tuple[int, ...]  # line numbers (from 1) it covers; () when it was not found
     link_lines: tuple[int, ...] = ()  # of a link-slot block: the video's own links below it
@@ -250,7 +271,8 @@ def _find_hits(lines: list[str], blocks: Sequence[TemplateBlock]) -> tuple[list[
 
 def find_block_lines(description: str, blocks: Sequence[TemplateBlock]) -> frozenset[int]:
     """Line numbers (from 1) of every library block found in the description: current text, old versions,
-    extra copies and the links under a link-slot block."""
+    extra copies and the links under a link-slot block. Placeholder blocks are not looked for."""
+    blocks = _real_blocks(blocks)
     if not blocks:
         return frozenset()
     _, taken = _find_hits(description.split("\n"), blocks)
@@ -311,12 +333,13 @@ def parse_description(description: str, template: DescriptionTemplate, blocks: S
     old version); the rest is sorted by what each line is: timestamps are chapters, a line of only hashtags
     is the hashtags, a YouTube video or playlist link is Watch next. Plain paragraphs are the opening (the
     first, if the description starts with it) or about (before the first fixed block or hashtags line).
-    Anything else goes to the tray."""
+    Anything else goes to the tray. A block that still holds its starter placeholder is not looked for; its
+    section is NOT_SET_UP."""
     lines = description.split("\n")
     library = {b.id: b for b in blocks}
     wanted_blocks = {s["block_id"] for s in template.sections if s.get("kind") == "block"}
     wanted_kinds = {s["kind"] for s in template.sections}
-    hits, taken = _find_hits(lines, blocks)
+    hits, taken = _find_hits(lines, _real_blocks(blocks))
 
     owner: dict[int, str] = {}  # line index -> section key, for lines that belong to a section
     tray_lines: dict[int, str] = {}  # line index -> why it is in the tray
@@ -396,6 +419,9 @@ def parse_description(description: str, template: DescriptionTemplate, blocks: S
             block = library.get(section["block_id"])
             if block is None:
                 continue
+            if is_placeholder(block):
+                rows.append((f"block:{block.id}", "block", block.name, block.id, NOT_SET_UP, (), ()))
+                continue
             hit = found_block.get(block.id)
             lines_of = tuple(sorted(i + 1 for i in (hit.lines + hit.links))) if hit else ()
             state = MISSING if hit is None else OUT_OF_DATE if hit.old else OK
@@ -423,8 +449,9 @@ def parse_description(description: str, template: DescriptionTemplate, blocks: S
 
 def judge_report(template: DescriptionTemplate, report: SectionReport, reason: str = "") -> TemplateJudgment:
     """Turn a parsed description into what the SEO check needs: 7 points for the shared blocks (1 for
-    current, half for an old version, none for missing; rounded down) and 3 for the order."""
-    block_states = [s for s in report.sections if s.kind == "block"]
+    current, half for an old version, none for missing; rounded down) and 3 for the order. A block that is
+    not set up (it still holds the starter placeholder) counts in neither, as if the template did not have it."""
+    block_states = [s for s in report.sections if s.kind == "block" and s.state != NOT_SET_UP]
     halves = sum(2 if s.state in (OK, WRONG_PLACE) else 1 if s.state == OUT_OF_DATE else 0
                  for s in block_states)
     if block_states:
@@ -444,6 +471,7 @@ def judge_report(template: DescriptionTemplate, report: SectionReport, reason: s
         missing=tuple(s.name for s in block_states if s.state == MISSING),
         out_of_date=tuple(s.name for s in block_states if s.state == OUT_OF_DATE),
         wrong_place=tuple(s.name for s in report.sections if not s.in_order),
+        not_set_up=tuple(s.name for s in report.sections if s.state == NOT_SET_UP),
         template_id=template.id,
     )
 

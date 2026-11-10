@@ -154,6 +154,7 @@ class TemplateJudgment:
     missing: tuple[str, ...] = ()  # names of shared blocks that are not in the description
     out_of_date: tuple[str, ...] = ()  # names of shared blocks found only as an old version
     wrong_place: tuple[str, ...] = ()  # names of blocks and sections found out of the template's order
+    not_set_up: tuple[str, ...] = ()  # names of shared blocks still holding the starter text: not scored
     template_id: int = 0
     excluded: bool = False  # the video is left out of templates (by hand, or as a Short)
 
@@ -601,10 +602,21 @@ def check_description_template(video: Video, context: ChannelContext | None) -> 
     if not judgment.order_ok and not judgment.wrong_place:
         clauses.append("too little of the template is there to check its order")
         if not steps:
-            steps.append("add the template's shared blocks so its order can be checked")
-    head = (f'Follows "{judgment.template_name}": '
-            + (f"{judgment.blocks_current} of {judgment.blocks_total} shared blocks current"
-               if judgment.blocks_total else "it has no shared blocks"))
+            # with every shared block still a placeholder, only the per-video sections can show the order
+            steps.append("add more of the template's sections so its order can be checked"
+                         if judgment.not_set_up and not judgment.blocks_total
+                         else "add the template's shared blocks so its order can be checked")
+    not_set_up = ""
+    if judgment.not_set_up:
+        many = len(judgment.not_set_up) > 1
+        not_set_up = f"{_names(judgment.not_set_up)} {'are' if many else 'is'} not set up yet"
+    if judgment.blocks_total:
+        head_tail = f"{judgment.blocks_current} of {judgment.blocks_total} shared blocks current"
+        if not_set_up:
+            clauses.append(not_set_up)
+    else:
+        head_tail = not_set_up or "it has no shared blocks"
+    head = f'Follows "{judgment.template_name}": ' + head_tail
     detail = head + ("; " + "; ".join(clauses) if clauses else "") + "."
     fix = ""
     if steps:

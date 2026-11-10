@@ -4208,7 +4208,7 @@ def create_app(
                 name = str(section["name"])
                 block_id = by_name.get(name.casefold())
                 if block_id is None:
-                    block_id = store.add_template_block(name, template_view_mod.STARTER_PLACEHOLDERS[name],
+                    block_id = store.add_template_block(name, descriptiontemplate_mod.STARTER_PLACEHOLDERS[name],
                                                         link_slot=bool(section.get("link_slot")))
                 sections.append({"kind": "block", "block_id": block_id})
             new_id = store.add_description_template(template_view_mod.STARTER_NAME, sections, is_default=True)

@@ -17,12 +17,6 @@ from ..validate import DESCRIPTION_BYTE_LIMIT
 
 PAGE_URL = "/description-templates"
 STARTER_NAME = "Main"
-# The text of the starter blocks. The user must replace it; the page marks a block that still carries it.
-STARTER_PLACEHOLDERS: dict[str, str] = {
-    "Paid links": "Replace this with your paid-links disclosure.",
-    "Support and follow": "Replace this with your support links.",
-}
-
 # One line under each per-video section, as in the mock-up.
 SECTION_HINTS: dict[str, str] = {
     "opening": 'First lines, with the main words before "more".',
@@ -33,10 +27,11 @@ SECTION_HINTS: dict[str, str] = {
 }
 STATE_LABELS: dict[str, str] = {
     dt.OK: "OK", dt.MISSING: "Missing", dt.OUT_OF_DATE: "Out of date", dt.WRONG_PLACE: "Wrong place",
-    dt.NOT_APPLICABLE: "Not applicable",
+    dt.NOT_APPLICABLE: "Not applicable", dt.NOT_SET_UP: "Not set up",
 }
 STATE_TONES: dict[str, str] = {
     dt.OK: "done", dt.MISSING: "warn", dt.OUT_OF_DATE: "warn", dt.WRONG_PLACE: "warn", dt.NOT_APPLICABLE: "",
+    dt.NOT_SET_UP: "",
 }
 
 
@@ -52,10 +47,6 @@ def rule_text(rule: Mapping[str, Any], playlist_titles: Mapping[str, str]) -> st
     if kind == "title_word":
         return f'"{value}" in the title'
     return f"Tagged {value}"
-
-
-def is_placeholder(block: TemplateBlock) -> bool:
-    return block.text in STARTER_PLACEHOLDERS.values()
 
 
 # --- the view model ------------------------------------------------------------------------------------
@@ -298,7 +289,7 @@ def build_templates_page(videos: Sequence[Video], blocks: Sequence[TemplateBlock
             if s.get("kind") == "block":
                 used_by.setdefault(int(s["block_id"]), []).append((t.id, t.name))
     block_views = tuple(BlockView(b.id, b.name, b.text, b.link_slot, len(b.old_versions),
-                                  tuple(name for _, name in used_by.get(b.id, ())), is_placeholder(b))
+                                  tuple(name for _, name in used_by.get(b.id, ())), dt.is_placeholder(b))
                         for b in blocks)
 
     by_views = sorted(videos, key=lambda v: (-v.view_count, v.title.casefold(), v.video_id))
@@ -346,8 +337,11 @@ def _template_view(template: DescriptionTemplate, templates: Sequence[Descriptio
             others = [name for tid, name in used_by.get(block.id, []) if tid != template.id]
             shared = f"Also in {_names(others)}." if others else "Used by this template only."
             hint = "Disclosure directly above the links; the links are each video's own." if block.link_slot else ""
+            placeholder = dt.is_placeholder(block)
+            if placeholder:  # not looked for in descriptions, so there is nothing to count
+                text, warn = "", False
             rows.append(SectionRow(key, block.name, hint, True, block.id, tuple(block.text.split("\n")),
-                                   is_placeholder(block), shared, text, warn, n > 0, n < len(sections) - 1))
+                                   placeholder, shared, text, warn, n > 0, n < len(sections) - 1))
         else:
             kind = str(section.get("kind"))
             rows.append(SectionRow(key, dt.SECTION_LABELS[kind], SECTION_HINTS[kind], False, None, (), False, "",

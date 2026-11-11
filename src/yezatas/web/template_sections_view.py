@@ -101,7 +101,7 @@ def build_sections_view(video: Video, shown_description: str, has_draft: bool,
             + (MenuOption(EXCLUDE, "Exclude this video", selected == EXCLUDE),))
     template = assignment.template
     asked = str(params.get("view") or "")
-    view = asked if asked in (SECTIONS, TEXT) else (SECTIONS if template is not None else TEXT)
+    view = SECTIONS if asked == SECTIONS else TEXT  # Plain text unless the address asks for Sections
     rows: tuple[SectionRow, ...] = ()
     tray: tuple[TrayRow, ...] = ()
     points = draft_points = None

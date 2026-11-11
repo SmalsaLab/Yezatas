@@ -109,11 +109,21 @@ def test_the_menu_and_state(tmp_path: Path) -> None:
     assert 'id="tp-vpoints">' in state and " of 10</span>" in state
 
 
-def test_the_default_tab_is_sections_with_a_template(tmp_path: Path) -> None:
+def test_the_default_tab_is_plain_text_even_with_a_template(tmp_path: Path) -> None:
     html = page(make_tp_ui(tmp_path))
+    assert 'id="tp-tab-text" class="active"' in html
+    assert 'id="tp-sections"' not in html
+    assert 'name="description"' in html
+    assert 'id="tp-choice"' in html and "<strong>Garden</strong>" in html  # the menu and state stay
+    assert 'id="tp-vpoints">' in html and 'href="/videos/vid000001?view=sections#edit"' in html
+
+
+def test_the_sections_view_is_asked_for_explicitly(tmp_path: Path) -> None:
+    html = page(make_tp_ui(tmp_path), "?view=sections")
     assert 'id="tp-tab-sections" class="active"' in html
     assert 'id="tp-sections"' in html
     assert 'name="description"' not in html  # the edit form is on Plain text
+    assert 'id="tp-choice"' in html
 
 
 def test_plain_text_shows_the_edit_form(tmp_path: Path) -> None:
@@ -125,7 +135,7 @@ def test_plain_text_shows_the_edit_form(tmp_path: Path) -> None:
 
 def test_an_unknown_view_falls_back_to_the_default(tmp_path: Path) -> None:
     html = page(make_tp_ui(tmp_path), "?view=nonsense")
-    assert 'id="tp-tab-sections" class="active"' in html
+    assert 'id="tp-tab-text" class="active"' in html
 
 
 def test_choosing_a_template_by_hand(tmp_path: Path) -> None:
@@ -156,6 +166,14 @@ def test_excluding_and_back_to_automatic(tmp_path: Path) -> None:
     assert "This video now follows the automatic choice." in page(ui)
 
 
+def test_set_from_plain_text_comes_back_to_plain_text(tmp_path: Path) -> None:
+    ui = make_tp_ui(tmp_path)
+    html = page(ui)
+    assert '<input type="hidden" name="view" value="text">' in html
+    resp = ui.post(URL + "/template", data={"choice": "auto", "view": "text"}, follow_redirects=False)
+    assert resp.headers["location"] == f"{URL}?view=text#edit"
+
+
 def test_a_deleted_template_is_refused(tmp_path: Path) -> None:
     ui = make_tp_ui(tmp_path)
     for choice in ("999", "not-a-number", ""):
@@ -182,7 +200,7 @@ def test_without_templates(tmp_path: Path) -> None:
 # --- the Sections view ------------------------------------------------------------------------------------
 
 def test_the_sections_and_the_tray(tmp_path: Path) -> None:
-    html = page(make_tp_ui(tmp_path))
+    html = page(make_tp_ui(tmp_path), "?view=sections")
     view = html[html.index('id="tp-sections"'):]
     assert "These sections show the text on YouTube now. To edit the text, use Plain text." in view
     opening = view[view.index('id="tp-sec-opening"'):]
@@ -202,7 +220,7 @@ def test_the_sections_and_the_tray(tmp_path: Path) -> None:
 
 
 def test_a_missing_chapters_section_links_to_the_tool(tmp_path: Path) -> None:
-    html = page(make_tp_ui(tmp_path, doc(OPENING, ABOUT, WATCH, PAID_LINKS, SUPPORT, HASHTAGS)))
+    html = page(make_tp_ui(tmp_path, doc(OPENING, ABOUT, WATCH, PAID_LINKS, SUPPORT, HASHTAGS)), "?view=sections")
     chapters = html[html.index('id="tp-sec-chapters"'):]
     chapters = chapters[:chapters.index("</li>")]
     assert "None yet" in chapters and '<a href="#tool-chapters">Make chapters</a>' in chapters
@@ -231,7 +249,7 @@ def test_apply_saves_a_draft_and_nothing_else(tmp_path: Path) -> None:
     assert row.description == doc(OPENING, ABOUT, CHAPTERS, WATCH, PAID_LINKS, SUPPORT, EXTRA, HASHTAGS)
     assert row.title == "How to build a raised garden bed"
     assert list(row.tags) == ["garden bed", "raised bed"]
-    html = page(ui)
+    html = page(ui, "?view=sections")
     assert ("Applied Garden: Added Support and follow. Saved as a draft. Nothing is sent to YouTube until you "
             "approve it and push.") in html
     assert 'id="video-draft-template">With this draft: ' in html and " of 10 on this check" in html
@@ -261,7 +279,7 @@ def test_apply_when_nothing_changes(tmp_path: Path) -> None:
 
 def test_apply_removes_ticked_tray_lines(tmp_path: Path) -> None:
     ui = make_tp_ui(tmp_path)
-    html = ui.client.get(URL).text
+    html = ui.client.get(URL + "?view=sections").text
     key = html[html.index('id="tp-tray-') + len('id="tp-tray-'):]
     key = key[:key.index('"')]
     apply(ui, remove=[key])

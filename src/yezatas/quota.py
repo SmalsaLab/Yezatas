@@ -18,6 +18,7 @@ COSTS: dict[str, int] = {
     "videos.list": 1,
     "channels.list": 1,
     "playlistItems.list": 1,
+    "playlists.list": 1,
     "commentThreads.list": 1,
     "videos.update": 50,
     "thumbnails.set": 50,

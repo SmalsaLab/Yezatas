@@ -54,6 +54,7 @@ from .. import captions as captions_mod
 from .. import soundtags as soundtags_mod
 from .. import primaryai, translate
 from ..catalog import NoChannelError, PullResult, pull_catalog
+from ..playlistpull import PlaylistPullResult, pull_playlists
 from ..config import PRIMARY_AI_CHOICES, Config, ensure_dirs
 from .. import affiliate as affiliate_mod
 from .. import bulkagent as bulkagent_mod
@@ -1025,6 +1026,7 @@ class WebState:
         self._thumb_page = ""  # the page that started the swap
         self._lock = threading.Lock()
         self._check_lock = threading.Lock()
+        self._playlist_pull_lock = threading.Lock()  # one playlist pull at a time
         self._check: CheckState | None = None
         self._flash: dict[str, list[tuple[str, str, str]]] = {}
 
@@ -1112,6 +1114,21 @@ class WebState:
                 return pull_catalog(reader, store, guard)
 
         return self.pull_job.start(work)
+
+    def run_playlist_pull(self) -> PlaylistPullResult | None:
+        """Read the channel's playlists in this (worker) thread; None if a playlist pull is already running.
+        Raises what the catalog pull raises (NeedsSignIn, QuotaExceeded, HttpError, ...)."""
+        if not self._playlist_pull_lock.acquire(blocking=False):
+            return None
+        try:
+            creds = self._credentials_loader(self.config)
+            if creds is None:
+                raise NeedsSignIn()
+            reader = self._reader_factory(creds)
+            with Store(self.config.catalog_db) as store:
+                return pull_playlists(reader, store, QuotaGuard(store, self.config.daily_quota_budget))
+        finally:
+            self._playlist_pull_lock.release()
 
     # --- write access and push --------------------------------------------------------------
     def write_credentials(self) -> Any:
@@ -4441,6 +4458,29 @@ def create_app(
             return "ok", "Priority changed.", templates_target(found.id)
 
         return await template_action(request, work)
+
+    @app.post(template_view_mod.PAGE_URL + "/playlists/pull")
+    async def pull_description_template_playlists(request: Request) -> Response:
+        """Read the channel's playlists from YouTube (read only) and store them, in this request."""
+        form = await read_form(request)
+        target = templates_target(_template_id(str(form.get("template") or "")), "rules")
+        try:
+            result = await run_in_threadpool(state.run_playlist_pull)
+        except Exception as exc:  # noqa: BLE001 - shown as the catalog pull shows it
+            flash(request, "error", map_api_error(exc)[1])
+            return see_other(target)
+        if result is None:
+            flash(request, "error", "Playlists are already being pulled.")
+            return see_other(target)
+        message = (f"Read {result.playlists} {'playlist' if result.playlists == 1 else 'playlists'} with "
+                   f"{result.items} {'video' if result.items == 1 else 'videos'}. "
+                   f"Used {result.units_used} quota {'unit' if result.units_used == 1 else 'units'}.")
+        if result.skipped:
+            message += (f" YouTube did not let Yezatas read {len(result.skipped)} "
+                        f"{'playlist' if len(result.skipped) == 1 else 'playlists'}: "
+                        + ", ".join(result.skipped) + ".")
+        flash(request, "ok", message)
+        return see_other(target)
 
     @app.post(template_view_mod.PAGE_URL + "/{template_id}/rules/add")
     async def add_description_template_rule(request: Request, template_id: str) -> Response:

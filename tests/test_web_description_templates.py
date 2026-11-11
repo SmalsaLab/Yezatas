@@ -426,7 +426,7 @@ def test_a_stored_playlist_can_be_a_rule(tmp_path: Path) -> None:
         other = store.add_description_template("Reviews", [{"kind": "opening"}])
         store.replace_playlists({"PLgarden01": ("Soil reviews", ["vid000005"])})
     form = section(page(ui, f"?template={other}"), "template")
-    assert '<option value="PLgarden01">Soil reviews</option>' in form
+    assert '<option value="PLgarden01">Soil reviews (1 video)</option>' in form
     nf(ui, f"{URL}/{other}/rules/add", data={"kind": "playlist", "value": "PLgarden01", "template": str(other)})
     html = page(ui, f"?template={other}")
     assert "In the playlist Soil reviews" in html
@@ -718,3 +718,164 @@ def test_the_nav_has_the_item_right_after_bulk_edit(tmp_path: Path) -> None:
     assert re.findall(r'class="nav-item active" href="([^"]+)"', html) == [URL]
     assert re.search(r'class="nav-item active" href="/description-templates"[^>]*>.*?<span>Description templates</span>',
                      html)
+
+
+# --- Pull playlists (phase 2d, read only) ----------------------------------------------------------------
+
+from fakes import make_http_error  # noqa: E402
+from webhelpers import write_client_file, write_token  # noqa: E402
+from yezatas.quota import QuotaGuard, _utc_now, quota_day  # noqa: E402
+
+PULL = f"{URL}/playlists/pull"
+
+
+@pytest.fixture
+def no_real_client(monkeypatch: pytest.MonkeyPatch) -> None:
+    import googleapiclient.discovery
+
+    def refuse(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("no real YouTube client may be built in these tests")
+
+    monkeypatch.setattr(googleapiclient.discovery, "build", refuse)
+
+
+def pull_ui(tmp_path: Path, signed_in: bool = True) -> tuple[Ui, int]:
+    """The usual five videos, "Main" as the default and "Reviews" without rules; two playlists on the fake
+    channel: one with two catalog videos and one from another channel."""
+    ui = make_dt_ui(tmp_path)
+    seed_main(ui)
+    with store_of(ui) as store:
+        reviews = store.add_description_template("Reviews", [{"kind": "opening"}])
+    if signed_in:
+        write_client_file(ui.config)
+        write_token(ui.config)
+    ui.reader.playlists = [
+        {"id": "PLgarden01", "title": "Soil reviews", "video_ids": ["vid000003", "vid000005"]},
+        {"id": "PLfriends", "title": "Friends' gardens", "video_ids": ["otherchan01"]},
+    ]
+    ui.reader.calls.clear()
+    return ui, reviews
+
+
+def flashes(ui: Ui, query: str = "") -> str:
+    html = page(ui, query).replace("&#39;", "'")
+    return " ".join(re.findall(r'<div class="flash [^"]*" role="[^"]*">([^<]*)', html))
+
+
+def ledger_notes(ui: Ui) -> list[tuple[str, str]]:
+    with store_of(ui) as store:
+        return [(r["operation"], r["note"]) for r in store.quota_entries(quota_day(_utc_now()))]
+
+
+def test_the_pull_button_and_its_line(tmp_path: Path, no_real_client: None) -> None:
+    ui, reviews = pull_ui(tmp_path)
+    form = section(page(ui, f"?template={reviews}"), "template")
+    pull = form[form.index('id="playlists-pull"'):]
+    pull = pull[:pull.index("</form>")]
+    assert f'action="{PULL}"' in pull and "Pull playlists</button>" in pull
+    assert "No playlists stored yet. Pulling only reads from YouTube." in pull
+    assert "Playlists are not pulled yet" in form
+    with store_of(ui) as store:
+        store.replace_playlists({"PLa": ("A", []), "PLb": ("B", [])})
+    assert "2 playlists stored. Pulling only reads from YouTube." in page(ui, f"?template={reviews}")
+    assert 'id="playlists-pull"' not in section(page(ui), "template")  # the default template has no rules
+
+
+def test_pulling_stores_the_playlists(tmp_path: Path, no_real_client: None) -> None:
+    ui, reviews = pull_ui(tmp_path)
+    resp = nf(ui, PULL, data={"template": str(reviews)})
+    assert resp.status_code == 303 and resp.headers["location"] == f"{URL}?template={reviews}#rules"
+    with store_of(ui) as store:
+        stored = {p.playlist_id: (p.title, p.video_ids) for p in store.playlists()}
+    assert stored == {"PLgarden01": ("Soil reviews", ("vid000003", "vid000005")),
+                      "PLfriends": ("Friends' gardens", ("otherchan01",))}
+    assert "Read 2 playlists with 3 videos. Used 4 quota units." in flashes(ui, f"?template={reviews}")
+    assert ledger_notes(ui) == [("channels.list", "playlist pull"), ("playlists.list", "playlist pull"),
+                                ("playlistItems.list", "playlist pull"), ("playlistItems.list", "playlist pull")]
+    assert {c[0] for c in ui.reader.calls} == {"channels_mine", "playlists_mine", "playlist_items"}
+
+
+def test_the_select_lists_playlists_with_catalog_counts(tmp_path: Path, no_real_client: None) -> None:
+    ui, reviews = pull_ui(tmp_path)
+    nf(ui, PULL, data={"template": str(reviews)})
+    form = section(page(ui, f"?template={reviews}"), "template").replace("&#39;", "'")
+    assert '<option value="PLgarden01">Soil reviews (2 videos)</option>' in form
+    assert '<option value="PLfriends">Friends\' gardens (0 videos)</option>' in form
+    assert "2 playlists stored. Pulling only reads from YouTube." in form
+
+
+def test_a_refused_playlist_is_named(tmp_path: Path, no_real_client: None) -> None:
+    ui, reviews = pull_ui(tmp_path)
+    ui.reader.playlist_errors["PLfriends"] = make_http_error(404, "playlistNotFound")
+    nf(ui, PULL, data={"template": str(reviews)})
+    assert ("Read 1 playlist with 2 videos. Used 4 quota units. YouTube did not let Yezatas read 1 playlist: "
+            "Friends' gardens.") in flashes(ui, f"?template={reviews}")
+
+
+def test_pulling_when_not_signed_in(tmp_path: Path, no_real_client: None) -> None:
+    ui, reviews = pull_ui(tmp_path, signed_in=False)
+    nf(ui, PULL, data={"template": str(reviews)})
+    assert ("You are not signed in, or the saved sign-in is no longer valid. Sign in again (step 6)."
+            in flashes(ui, f"?template={reviews}"))
+    assert ui.reader.calls == [] and ledger_notes(ui) == []
+
+
+def test_pulling_with_too_little_quota(tmp_path: Path, no_real_client: None) -> None:
+    ui, reviews = pull_ui(tmp_path)
+    with store_of(ui) as store:
+        store.replace_playlists({"PLold": ("Old list", ["vid000001"])})
+        QuotaGuard(store, ui.config.daily_quota_budget).charge("videos.list", ui.config.daily_quota_budget - 3)
+    nf(ui, PULL, data={"template": str(reviews)})
+    assert ("Not enough quota left: need 2 units for 2 playlistItems.list pages of 2 playlists but only 1 "
+            "remaining. It resets at midnight Pacific time.") in flashes(ui, f"?template={reviews}")
+    with store_of(ui) as store:
+        assert [p.playlist_id for p in store.playlists()] == ["PLold"]
+
+
+def test_pulling_when_youtube_fails(tmp_path: Path, no_real_client: None) -> None:
+    ui, reviews = pull_ui(tmp_path)
+    ui.reader.playlists_error = make_http_error(500, "backendError", "The service is resting.")
+    nf(ui, PULL, data={"template": str(reviews)})
+    assert ("YouTube returned an error: HTTP 500 (backendError). The service is resting."
+            in flashes(ui, f"?template={reviews}"))
+    ui.reader.playlists_error = make_http_error(403, "quotaExceeded", "Quota.")
+    nf(ui, PULL, data={"template": str(reviews)})
+    assert ("Today's YouTube quota is used up. It resets at midnight Pacific time, so try again then."
+            in flashes(ui, f"?template={reviews}"))
+
+
+def test_the_pull_needs_the_csrf_token(tmp_path: Path, no_real_client: None) -> None:
+    ui, _ = pull_ui(tmp_path)
+    assert ui.client.post(PULL, data={}, follow_redirects=False).status_code == 403
+    assert ui.client.post(PULL, data={"csrf": "wrong"}, follow_redirects=False).status_code == 403
+    assert ui.reader.calls == []
+
+
+def test_a_pulled_playlist_rule_claims_its_videos(tmp_path: Path, no_real_client: None) -> None:
+    ui, reviews = pull_ui(tmp_path)
+    nf(ui, PULL, data={"template": str(reviews)})
+    nf(ui, f"{URL}/{reviews}/rules/add", data={"kind": "playlist", "value": "PLgarden01", "template": str(reviews)})
+    assert "In the playlist Soil reviews" in section(page(ui, f"?template={reviews}"), "template")
+    video = ui.client.get("/videos/vid000005").text
+    state = video[video.index('id="tp-vstate"'):]
+    state = state[:state.index("</p>")]
+    assert "<strong>Reviews</strong>" in state and "In the playlist Soil reviews." in state
+
+
+def test_a_rule_whose_playlist_is_gone(tmp_path: Path, no_real_client: None) -> None:
+    ui, reviews = pull_ui(tmp_path)
+    nf(ui, PULL, data={"template": str(reviews)})
+    nf(ui, f"{URL}/{reviews}/rules/add", data={"kind": "playlist", "value": "PLgarden01", "template": str(reviews)})
+    ui.reader.playlists = [p for p in ui.reader.playlists if p["id"] != "PLgarden01"]
+    nf(ui, PULL, data={"template": str(reviews)})
+    form = section(page(ui, f"?template={reviews}"), "template")
+    rule = form[form.index('class="tp-rule"'):]
+    rule = rule[:rule.index("</li>")]
+    assert "<span>Playlist no longer on YouTube</span>" in rule
+    assert 'name="value" value="PLgarden01"' in rule and ">Remove</button>" in rule
+    video = ui.client.get("/videos/vid000005").text
+    state = video[video.index('id="tp-vstate"'):]
+    assert "<strong>Main</strong>" in state[:state.index("</p>")]  # the rule matches nothing now
+    nf(ui, f"{URL}/{reviews}/rules/remove", data={"kind": "playlist", "value": "PLgarden01",
+                                                   "template": str(reviews)})
+    assert 'class="tp-rule"' not in section(page(ui, f"?template={reviews}"), "template")

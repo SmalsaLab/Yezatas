@@ -40,10 +40,14 @@ def section_key(section: Mapping[str, Any]) -> str:
     return f"block:{section.get('block_id')}" if section.get("kind") == "block" else str(section.get("kind"))
 
 
+GONE_PLAYLIST = "Playlist no longer on YouTube"  # a playlist rule whose playlist is not stored any more
+
+
 def rule_text(rule: Mapping[str, Any], playlist_titles: Mapping[str, str]) -> str:
     kind, value = rule.get("kind"), str(rule.get("value") or "")
     if kind == "playlist":
-        return f"In the playlist {playlist_titles.get(value) or value}"
+        title = playlist_titles.get(value)
+        return f"In the playlist {title}" if title is not None else GONE_PLAYLIST
     if kind == "title_word":
         return f'"{value}" in the title'
     return f"Tagged {value}"
@@ -166,7 +170,7 @@ class TemplatesPage:
     chosen: TemplateView | None
     blocks: tuple[BlockView, ...]
     include_shorts: bool
-    playlists: tuple[tuple[str, str], ...]  # (playlist id, title)
+    playlists: tuple[tuple[str, str, int], ...]  # (playlist id, title, how many of the catalog's videos it holds)
     following_videos: tuple[PreviewChoice, ...]
     other_videos: tuple[PreviewChoice, ...]
     preview: PreviewView | None
@@ -268,6 +272,7 @@ def build_templates_page(videos: Sequence[Video], blocks: Sequence[TemplateBlock
     counts = {t.template_id: t.following + t.needs_changes for t in cover_data.templates}
     by_id = {t.id: t for t in templates}
     titles = {p.playlist_id: p.title for p in playlists}
+    catalog_ids = {v.video_id for v in videos}
 
     notice = ""
     wanted = params.get("template")
@@ -310,7 +315,8 @@ def build_templates_page(videos: Sequence[Video], blocks: Sequence[TemplateBlock
     return TemplatesPage(
         empty=not templates, cover=cover, chips=chips, chosen=chosen, blocks=block_views,
         include_shorts=include_shorts,
-        playlists=tuple((p.playlist_id, p.title) for p in playlists),
+        playlists=tuple((p.playlist_id, p.title, sum(1 for vid in p.video_ids if vid in catalog_ids))
+                        for p in playlists),
         following_videos=tuple(PreviewChoice(v.video_id, v.title) for v in following),
         other_videos=tuple(PreviewChoice(v.video_id, v.title) for v in by_views if v.video_id not in follow_ids),
         preview=preview, notice=notice, typed=dict(typed or {}),

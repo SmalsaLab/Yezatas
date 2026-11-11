@@ -155,7 +155,7 @@
         <label for="rule-playlist">In the playlist</label>
         {% if tp.playlists %}
         <select id="rule-playlist" name="value">
-          {% for pid, ptitle in tp.playlists %}<option value="{{ pid }}"{% if ru.get('kind') == 'playlist' and ru.get('value') == pid %} selected{% endif %}>{{ ptitle }}</option>{% endfor %}
+          {% for pid, ptitle, pcount in tp.playlists %}<option value="{{ pid }}"{% if ru.get('kind') == 'playlist' and ru.get('value') == pid %} selected{% endif %}>{{ ptitle }} ({{ pcount }} {{ "video" if pcount == 1 else "videos" }})</option>{% endfor %}
         </select>
         <button type="submit" class="button secondary">Add</button>
         {% else %}
@@ -176,6 +176,14 @@
         <button type="submit" class="button secondary">Add</button>
       </form>
     </details>
+    {% endif %}
+    {% if not t.is_default %}
+    <form class="tp-inline-form tp-pull-playlists" id="playlists-pull" method="post" action="{{ base }}/playlists/pull">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <input type="hidden" name="template" value="{{ t.id }}">
+      <button type="submit" class="button secondary">Pull playlists</button>
+      <span class="hint" id="playlists-count">{% if tp.playlists %}{{ tp.playlists|length }} {{ "playlist" if tp.playlists|length == 1 else "playlists" }} stored.{% else %}No playlists stored yet.{% endif %} Pulling only reads from YouTube.</span>
+    </form>
     {% endif %}
   </div>
 

@@ -13,7 +13,7 @@
       <span class="vfix-points">+{{ c.max_points - c.points }}</span>
       <a class="vfix-title" href="#check-{{ c.check_id }}">{{ c.title }}</a>
       {% if c.fix %}<p class="vfix-fix">{{ c.fix }}</p>{% endif %}
-      {{ fix_go(c, video.video_id, 'vfix-go') }}
+      {% if c.check_id == 'description_template' %}<a class="vfix-go" href="/videos/{{ video.video_id|urlencode }}?view=sections#edit">Apply template</a>{% else %}{{ fix_go(c, video.video_id, 'vfix-go') }}{% endif %}
     </li>
     {% endfor %}
   </ul>{% if card.failed|length > 4 %}</details>{% endif %}

@@ -1,0 +1,85 @@
+{# The description template on the Edit card: the template menu and state, the Sections / Plain text tabs, and
+   the read-only Sections view with the "Not in the template" tray and Apply template. `tsv` is
+   web/template_sections_view.SectionsView. Plain forms and links; nothing here needs JavaScript. #}
+{% set vbase = "/videos/" ~ (video.video_id|urlencode) %}
+<div class="tp-vrow" id="tp-vrow">
+  {% if tsv.has_templates %}
+  <form class="tp-vmenu" method="post" action="{{ vbase }}/template">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="hidden" name="view" value="{{ tsv.view }}">
+    <label for="tp-choice">Template</label>
+    <select id="tp-choice" name="choice">
+      {% for o in tsv.menu %}<option value="{{ o.value }}"{% if o.selected %} selected{% endif %}>{{ o.label }}</option>{% endfor %}
+    </select>
+    <button type="submit" class="button secondary">Set</button>
+  </form>
+  <p class="tp-vstate" id="tp-vstate">
+    {% if tsv.template_name %}<strong>{{ tsv.template_name }}</strong> <span class="muted">{{ tsv.reason }}</span>
+      {% if tsv.points is not none %}<span class="pill {{ 'done' if tsv.points >= tsv.max_points else 'warn' }}" id="tp-vpoints">{{ tsv.points }} of {{ tsv.max_points }}</span>{% endif %}
+    {% else %}<span class="muted">{{ tsv.reason }}</span>{% endif %}
+  </p>
+  {% endif %}
+  <nav class="tp-tabs" aria-label="Description view">
+    <a href="{{ vbase }}?view=sections#edit" id="tp-tab-sections"{% if tsv.view == 'sections' %} class="active" aria-current="page"{% endif %}>Sections</a>
+    <a href="{{ vbase }}?view=text#edit" id="tp-tab-text"{% if tsv.view == 'text' %} class="active" aria-current="page"{% endif %}>Plain text</a>
+  </nav>
+</div>
+
+{% if tsv.view == 'sections' %}
+<div class="tp-vsections" id="tp-sections">
+  {% if not tsv.has_templates %}
+  <p class="muted" id="tp-no-templates">You have no description templates yet. <a href="/description-templates">Set up description templates</a></p>
+  {% elif tsv.excluded %}
+  <p class="muted" id="tp-excluded">This video is left out of description templates. {{ tsv.reason }} Choose a template above to include it.</p>
+  {% elif not tsv.template_name %}
+  <p class="muted" id="tp-no-template">{{ tsv.reason }}</p>
+  {% else %}
+  {# with a draft, the draft note above the tabs says the card shows the draft #}
+  <p class="hint" id="tp-shows">{% if not tsv.from_draft %}These sections show the text on YouTube now. {% endif %}To edit the text, use Plain text.</p>
+  <ul class="tp-vlist">
+    {% for r in tsv.rows %}
+    <li class="tp-vsec" id="tp-sec-{{ r.key|replace(':', '-') }}">
+      <div class="tp-vsec-name">
+        <span class="tp-vsec-title">{{ r.name }}</span>
+        <span class="hint">{% if r.from_template %}From template{% else %}{{ r.kind_label }}{% endif %}</span>
+      </div>
+      <div class="tp-vsec-text">
+        {% if r.lines %}
+        {% for line in r.lines %}{% if line.css == 'more' %}<div class="tp-more">{{ line.text }}</div>{% else %}<div class="tp-line">{{ line.text or " " }}</div>{% endif %}{% endfor %}
+        {% else %}<span class="muted">None yet</span>{% if r.tool %} <a href="{{ r.tool[0] }}">{{ r.tool[1] }}</a>{% endif %}
+        {% endif %}
+      </div>
+      <span class="pill {{ r.tone }} tp-vsec-state">{{ r.label }}</span>
+    </li>
+    {% endfor %}
+  </ul>
+
+  {% if tsv.tray %}
+  <div class="tp-vtray" id="tp-tray">
+    <h3 class="tp-h3">Not in the template</h3>
+    <p class="hint">Each line is kept when you apply the template, unless you tick it.</p>
+    <ul>
+      {% for t in tsv.tray %}
+      <li id="tp-tray-{{ t.key }}">
+        <pre>{{ t.text }}</pre>
+        <span class="hint">{{ t.reason }}</span>
+        <label class="check-label"><input type="checkbox" name="remove" value="{{ t.key }}" form="tp-apply"{% if tsv.has_draft %} disabled{% endif %}> Remove when applying</label>
+      </li>
+      {% endfor %}
+    </ul>
+  </div>
+  {% endif %}
+
+  <form class="tp-vapply" id="tp-apply" method="post" action="{{ vbase }}/template/apply">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    {% if tsv.has_draft %}
+    <button type="submit" class="button primary" disabled>Apply template</button>
+    <span class="hint" id="tp-apply-blocked">This video already has a draft. Push or discard it first.</span>
+    {% else %}
+    <button type="submit" class="button primary">Apply template</button>
+    <span class="hint">Saves the result as a draft. Nothing is sent to YouTube until you approve it on the Changes page.</span>
+    {% endif %}
+  </form>
+  {% endif %}
+</div>
+{% endif %}

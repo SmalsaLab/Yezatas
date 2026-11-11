@@ -758,3 +758,259 @@ def test_placeholder_old_versions_are_not_looked_for() -> None:
     assert find_block_lines(f"My garden.\n{placeholder}", [filled]) == frozenset()
     assert find_block_lines("My garden.\nOlder paid text.", [filled]) == frozenset({2})
     assert find_block_lines(f"My garden.\n{real}", [filled]) == frozenset({2})
+
+
+# --- Applying a template (phase 2c) -----------------------------------------------------------------------
+
+import re  # noqa: E402
+from collections import Counter  # noqa: E402
+
+from yezatas.descriptiontemplate import apply_template  # noqa: E402
+
+_TOKENS = re.compile(r"https?://\S+|\b\d{1,2}:\d{2}(?::\d{2})?\b|#\w+|\d+")
+TIDY = "Put the text in the template's order, with one blank line between sections"
+
+
+def tokens(text: str) -> Counter:
+    return Counter(_TOKENS.findall(text))
+
+
+def assert_nothing_lost(original: str, result: str, dropped: tuple[str, ...] = ()) -> None:
+    """Every URL, timestamp, hashtag and number of `original` is in `result`, except those in `dropped` (removed
+    tray items and replaced old block versions)."""
+    wanted = tokens(original)
+    for text in dropped:
+        wanted -= tokens(text)
+    missing = wanted - tokens(result)
+    assert not missing, f"lost: {dict(missing)}"
+
+
+def applied(description: str, tpl: DescriptionTemplate | None = None, blocks=LIBRARY, remove=(),
+            dropped: tuple[str, ...] = ()):
+    """Apply, then check the result keeps everything and that applying again changes nothing."""
+    tpl = tpl or template()
+    result = apply_template(description, tpl, blocks, make_video(), remove)
+    assert_nothing_lost(description, result.description, dropped)
+    again = apply_template(result.description, tpl, blocks, make_video())
+    assert not again.changed and again.description == result.description, again.description
+    assert again.changes == ()
+    return result
+
+
+def test_apply_to_a_description_that_follows_the_template_changes_nothing():
+    result = applied(FULL)
+    assert not result.changed and result.description == FULL and result.changes == ()
+
+
+def test_apply_inserts_a_missing_block_in_its_place():
+    result = applied(doc(OPENING, ABOUT, CHAPTER_LINES, WATCH, PAID_TEXT, HASHTAGS))
+    assert result.description == FULL
+    assert result.changes == ("Added Support and follow",)
+
+
+def test_apply_replaces_an_old_version_and_keeps_the_rest():
+    original = doc(OPENING, ABOUT, CHAPTER_LINES, WATCH, PAID_TEXT, OLD_SUPPORT, HASHTAGS)
+    result = applied(original, dropped=(OLD_SUPPORT,))
+    assert result.description == FULL
+    assert result.changes == ("Updated Support and follow to the current text",)
+
+
+def test_apply_moves_a_block_out_of_order():
+    original = doc(OPENING, ABOUT, CHAPTER_LINES, WATCH, SUPPORT.text, PAID_TEXT, HASHTAGS)
+    result = applied(original)
+    assert result.description == FULL
+    assert len(result.changes) == 1 and result.changes[0].startswith("Moved ")
+    assert result.changes[0].endswith(" to its place")
+
+
+def test_apply_moves_per_video_sections_without_rewording_them():
+    original = doc(OPENING, ABOUT, HASHTAGS, CHAPTER_LINES, WATCH, PAID_TEXT, SUPPORT.text)
+    result = applied(original)
+    assert result.description == FULL
+    assert "Moved Hashtags to its place" in result.changes
+
+
+def test_apply_keeps_the_link_slot_links_under_their_block():
+    old_paid = "Paid links help the channel."
+    paid_old = TemplateBlock(1, "Paid links", PAID.text, (old_paid,), True)
+    original = doc(OPENING, ABOUT, CHAPTER_LINES, WATCH, SUPPORT.text,
+                   old_paid + "\nhttps://shop.test/trowel\nhttps://shop.test/gloves", HASHTAGS)
+    result = applied(original, blocks=[paid_old, SUPPORT, NEWSLETTER], dropped=(old_paid,))
+    assert result.description == FULL
+    assert "Updated Paid links to the current text" in result.changes
+
+
+def test_apply_inserts_a_missing_link_slot_block_without_links():
+    result = applied(doc(OPENING, ABOUT, CHAPTER_LINES, WATCH, SUPPORT.text, HASHTAGS))
+    assert result.description == doc(OPENING, ABOUT, CHAPTER_LINES, WATCH, PAID.text, SUPPORT.text, HASHTAGS)
+    assert result.changes == ("Added Paid links",)
+
+
+def test_apply_never_inserts_a_placeholder_block():
+    placeholder = TemplateBlock(2, "Support and follow", STARTER_PLACEHOLDERS["Support and follow"], (), False)
+    original = doc(OPENING, ABOUT, CHAPTER_LINES, WATCH, PAID_TEXT, HASHTAGS)
+    result = applied(original, blocks=[PAID, placeholder])
+    assert not result.changed and result.description == original
+
+
+def test_apply_leaves_missing_per_video_sections_missing():
+    original = doc(PAID_TEXT, SUPPORT.text)
+    result = applied(original)
+    assert result.description == original and not result.changed
+
+
+def test_apply_to_an_empty_description_inserts_the_blocks_only():
+    result = applied("")
+    assert result.description == doc(PAID.text, SUPPORT.text)
+    assert result.changes == ("Added Paid links", "Added Support and follow")
+
+
+def test_apply_with_a_template_without_blocks_only_orders():
+    tpl = template(sections=({"kind": "opening"}, {"kind": "chapters"}, {"kind": "hashtags"}))
+    result = applied(doc(OPENING, HASHTAGS, CHAPTER_LINES), tpl=tpl)
+    assert result.description == doc(OPENING, CHAPTER_LINES, HASHTAGS)
+    assert result.changed and result.changes[0].startswith("Moved ")
+
+
+def test_apply_reads_windows_line_endings():
+    result = applied(FULL.replace("\n", "\r\n"))
+    assert result.description == FULL and not result.changed
+
+
+def test_apply_separates_sections_with_one_blank_line_and_keeps_blank_lines_inside():
+    about = "The soil mix is one part compost.\n\n\nTwo parts topsoil keep it light."
+    spaced = (OPENING + "\n\n\n\n" + about + "\n\n" + CHAPTER_LINES + "\n\n\n" + WATCH + "\n\n" + PAID_TEXT
+              + "\n\n" + SUPPORT.text + "\n\n\n\n" + HASHTAGS + "\n\n")
+    result = applied(spaced)
+    assert result.description == doc(OPENING, about, CHAPTER_LINES, WATCH, PAID_TEXT, SUPPORT.text, HASHTAGS)
+    assert result.changes == (TIDY,)
+
+
+def test_apply_keeps_a_block_found_current_character_for_character():
+    support = "Support the garden channel:   \n\nhttps://shop.test/support"
+    original = doc(OPENING, ABOUT, CHAPTER_LINES, WATCH, PAID_TEXT, support, HASHTAGS)
+    result = applied(original)
+    assert result.description == original and not result.changed
+
+
+def test_apply_keeps_own_lines_character_for_character():
+    opening = "  We build a raised   bed in one day.  "
+    original = doc(opening, ABOUT, CHAPTER_LINES, WATCH, PAID_TEXT, SUPPORT.text, HASHTAGS)
+    result = applied(original)
+    assert result.description.split("\n")[0] == opening
+
+
+def test_tray_items_have_stable_keys():
+    extra = "See more at https://links.invalid/more"
+    (item,) = parse(doc(OPENING, extra, PAID_TEXT)).tray
+    assert item.key == parse(doc(OPENING, extra, PAID_TEXT)).tray[0].key
+    assert len(item.key) == 10
+    assert item.key != parse(doc(OPENING, ABOUT, extra, PAID_TEXT)).tray[0].key
+
+
+def test_apply_keeps_a_tray_line_by_default_after_the_last_block_before_the_hashtags():
+    extra = "See more at https://links.invalid/more"
+    original = doc(OPENING, extra, ABOUT, CHAPTER_LINES, WATCH, PAID_TEXT, SUPPORT.text, HASHTAGS)
+    result = applied(original)
+    assert result.description == doc(OPENING, ABOUT, CHAPTER_LINES, WATCH, PAID_TEXT, SUPPORT.text, extra,
+                                      HASHTAGS)
+    assert result.changes == (TIDY,)
+
+
+def test_apply_keeps_tray_items_together_in_their_order():
+    first, second = "See more at https://links.invalid/more", "Seeds: https://links.invalid/seeds"
+    original = doc(OPENING, first, ABOUT, CHAPTER_LINES, WATCH, PAID_TEXT, second, SUPPORT.text, HASHTAGS)
+    result = applied(original)
+    assert result.description == doc(OPENING, ABOUT, CHAPTER_LINES, WATCH, PAID_TEXT, SUPPORT.text, first,
+                                      second, HASHTAGS)
+
+
+def test_apply_puts_the_tray_before_the_hashtags_without_blocks():
+    tpl = template(sections=({"kind": "opening"}, {"kind": "chapters"}, {"kind": "hashtags"}))
+    extra = "See more at https://links.invalid/more"
+    result = applied(doc(OPENING, HASHTAGS, extra), tpl=tpl)
+    assert result.description == doc(OPENING, extra, HASHTAGS)
+
+
+def test_apply_puts_the_tray_last_without_blocks_or_hashtags():
+    tpl = template(sections=({"kind": "opening"}, {"kind": "chapters"}, {"kind": "hashtags"}))
+    extra = "See more at https://links.invalid/more"
+    result = applied(doc(OPENING, extra, CHAPTER_LINES), tpl=tpl)
+    assert result.description == doc(OPENING, CHAPTER_LINES, extra)
+
+
+def test_known_gap_a_trailing_plain_paragraph_without_blocks_or_hashtags_is_read_as_about():
+    """Documents a known gap (accepted, no special behaviour). With no shared block and no hashtags, a plain
+    paragraph after the chapters is not a tray item: the parser reads it as About, so Apply moves it to About's
+    place (above the chapters). Nothing is lost, and applying again changes nothing."""
+    tpl = template(sections=({"kind": "opening"}, {"kind": "about"}, {"kind": "chapters"}))
+    extra = "Thanks for watching, see you next week."
+    original = doc(OPENING, CHAPTER_LINES, extra)
+    assert parse(original, tpl).tray == ()
+    result = applied(original, tpl=tpl)
+    assert result.description == doc(OPENING, extra, CHAPTER_LINES)
+    assert result.changes == ("Moved About the video to its place",)
+
+
+def test_a_plain_paragraph_after_a_tray_item_stays_last_without_blocks_or_hashtags():
+    tpl = template(sections=({"kind": "opening"}, {"kind": "about"}, {"kind": "chapters"}))
+    extra = "Thanks for watching, see you next week."
+    original = doc(OPENING, CHAPTER_LINES, NEWSLETTER.text, extra)
+    assert [item.text for item in parse(original, tpl).tray] == [NEWSLETTER.text, extra]
+    result = applied(original, tpl=tpl)
+    assert result.description == original and not result.changed
+
+
+def test_apply_removes_a_ticked_tray_item():
+    extra = "See more at https://links.invalid/more"
+    original = doc(OPENING, ABOUT, CHAPTER_LINES, WATCH, PAID_TEXT, SUPPORT.text, extra, HASHTAGS)
+    (item,) = parse(original).tray
+    result = applied(original, remove=(item.key,), dropped=(extra,))
+    assert result.description == FULL
+    assert result.changes == ("Removed 1 line that was not in the template",)
+
+
+def test_apply_puts_the_tray_after_the_blocks_without_own_text():
+    extra = "See more at https://links.invalid/more"
+    result = applied(doc(PAID_TEXT, extra, SUPPORT.text))
+    assert result.description == doc(PAID_TEXT, SUPPORT.text, extra)
+
+
+def test_apply_keeps_a_block_the_template_does_not_use_and_removes_it_when_ticked():
+    original = doc(OPENING, ABOUT, CHAPTER_LINES, WATCH, PAID_TEXT, NEWSLETTER.text, SUPPORT.text, HASHTAGS)
+    (item,) = parse(original).tray
+    assert item.reason == "Newsletter is not in this template"
+    kept = applied(original)
+    assert NEWSLETTER.text in kept.description
+    removed = applied(original, remove=(item.key,), dropped=(NEWSLETTER.text,))
+    assert removed.description == FULL
+    assert removed.changes == ("Removed 1 line that was not in the template",)
+
+
+def test_apply_removes_a_second_copy_when_ticked():
+    original = doc(OPENING, ABOUT, CHAPTER_LINES, WATCH, PAID_TEXT, SUPPORT.text, HASHTAGS, SUPPORT.text)
+    (item,) = parse(original).tray
+    assert item.reason == "A second copy of Support and follow"
+    result = applied(original, remove=(item.key,), dropped=(SUPPORT.text,))
+    assert result.description == FULL
+    assert result.changes == ("Removed 2 lines that were not in the template",)
+
+
+def test_apply_keeps_a_second_copy_by_default():
+    original = doc(OPENING, ABOUT, CHAPTER_LINES, WATCH, PAID_TEXT, SUPPORT.text, HASHTAGS, SUPPORT.text)
+    result = applied(original)
+    assert result.description.count(SUPPORT.text) == 2
+
+
+def test_apply_keeps_an_old_second_copy_as_it_is():
+    original = doc(OPENING, ABOUT, CHAPTER_LINES, WATCH, PAID_TEXT, SUPPORT.text, HASHTAGS, OLD_SUPPORT)
+    result = applied(original)
+    assert OLD_SUPPORT in result.description and SUPPORT.text in result.description
+
+
+def test_apply_keeps_a_plain_tray_paragraph_in_the_tray():
+    extra = "Thanks for watching, see you next week."
+    original = doc(OPENING, ABOUT, CHAPTER_LINES, WATCH, PAID_TEXT, extra, SUPPORT.text, HASHTAGS)
+    assert [item.text for item in parse(original).tray] == [extra]
+    result = applied(original)
+    assert [item.text for item in parse(result.description).tray] == [extra]

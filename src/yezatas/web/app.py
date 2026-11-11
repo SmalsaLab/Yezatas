@@ -73,6 +73,7 @@ from .category_view import build_category_view
 from .pinned_view import build_pinned_view
 from . import template_view as template_view_mod
 from . import template_build_view as template_build_view_mod
+from . import template_sections_view as template_sections_view_mod
 from .nav_counts import build_nav_counts
 from ..store import AdCheck, CategoryCheck, OutlierReport, PinnedComment, ShortsFind, Store, ThumbnailVariant
 from ..subtitles import to_srt
@@ -91,7 +92,7 @@ from .thumbswap_view import build_swap_rows
 from .jobs import Job, JobSnapshot, Report
 from .security import CSRF_FIELD, Sessions, install_security, load_session_key, verify_csrf
 from .steps import CheckState, compute_steps, estimate_pull_units
-from ..validate import DESCRIPTION_BYTE_LIMIT, TITLE_LIMIT
+from ..validate import DESCRIPTION_BYTE_LIMIT, TITLE_LIMIT, Draft, validate_draft
 from .views import (API_LIMITS, BULK_EXAMPLES, STARTER_QUESTIONS, build_agent_session, build_posted_rows, Entry, PreviewChoice, RunView, SuggestBatch, SuggestItem,
                     affiliate_apply_message, build_adcheck_view, build_shorts_view, build_affiliate_preview,
                     build_agent_review, build_bulk_preview, build_channel_comments_view, build_checks_view, build_comments_view, build_copilot_turns, build_glossary_rows, build_links_view, build_listing,
@@ -2840,7 +2841,14 @@ def create_app(
             pinned_record = store.pinned_comment(video_id)
             current_hash = adcheck_mod.current_source_hash(store, video_id)
         vs = video_stats_card(video_id, parse_duration(video.duration))
+        with Store(config.catalog_db) as store:
+            tsv = template_sections_view_mod.build_sections_view(
+                video, text[1], row is not None, store.list_description_templates(),
+                store.list_template_blocks(), store.template_choices(), store.templates_include_shorts(),
+                store.playlist_memberships(), {p.playlist_id: p.title for p in store.playlists()},
+                dict(request.query_params))
         return render(request, "video.html", {
+            "tsv": tsv,
             "ac": ac, "av": build_adcheck_view(stored_check, current_hash, _local_time),
             "sp": sh, "sr": build_shorts_view(video_id, stored_shorts, transcript.id if transcript else 0,
                             _local_time),
@@ -3701,6 +3709,83 @@ def create_app(
         flash(request, "ok", "Draft saved. Nothing is sent to YouTube until you approve it "
               "and push.")
         return see_other(f"/changes#d-{quote(video_id)}")
+
+    # --- description template on the video page (phase 2c): the menu and Apply; Apply only saves a draft ---
+    def template_back(video_id: str, view: str = "") -> str:
+        query = f"?view={view}" if view in (template_sections_view_mod.SECTIONS, template_sections_view_mod.TEXT) else ""
+        return f"/videos/{quote(video_id)}{query}#edit"
+
+    @app.post("/videos/{video_id}/template")
+    async def set_video_template(request: Request, video_id: str) -> Response:
+        form = await read_form(request)
+        choice = str(form.get("choice") or "")
+        back = template_back(video_id, str(form.get("view") or ""))
+
+        def run() -> tuple[str, str] | None:
+            with Store(config.catalog_db) as store:
+                if store.get_video(video_id) is None:
+                    return None
+                if choice == template_sections_view_mod.AUTO:
+                    store.clear_template_choice(video_id)
+                    return "ok", "This video now follows the automatic choice."
+                if choice == template_sections_view_mod.EXCLUDE:
+                    store.exclude_from_templates(video_id)
+                    return "ok", "This video is now left out of description templates."
+                wanted = _template_id(choice)
+                found = store.get_description_template(wanted) if wanted is not None else None
+                if found is None:
+                    return "error", "That template does not exist."
+                store.set_template_choice(video_id, found.id)
+                return "ok", f"This video now follows {found.name}."
+
+        outcome = await run_in_threadpool(run)
+        if outcome is None:
+            return video_not_found(request)
+        flash(request, *outcome)
+        return see_other(back)
+
+    @app.post("/videos/{video_id}/template/apply")
+    async def apply_video_template(request: Request, video_id: str) -> Response:
+        form = await read_form(request)
+        remove = frozenset(str(v) for v in form.getlist("remove"))
+        back = template_back(video_id, template_sections_view_mod.SECTIONS)
+
+        def run() -> tuple[str, str] | None:
+            with Store(config.catalog_db) as store:
+                video = store.get_video(video_id)
+                if video is None:
+                    return None
+                if store.get_draft(video_id) is not None:
+                    return "error", "This video already has a draft. Push or discard it first."
+                assignment = descriptiontemplate_mod.assign_template(
+                    video, store.list_description_templates(), store.template_choices(),
+                    store.templates_include_shorts(), store.playlist_memberships(),
+                    {p.playlist_id: p.title for p in store.playlists()})
+                if assignment.template is None:
+                    return "error", f"{assignment.reason} No template was applied."
+                result = descriptiontemplate_mod.apply_template(
+                    video.description, assignment.template, store.list_template_blocks(), video, remove)
+                if not result.changed:
+                    return "info", f"This description already follows {assignment.template.name}."
+                size = len(result.description.encode("utf-8"))
+                if size > DESCRIPTION_BYTE_LIMIT:
+                    return ("error", f"With the template the description would be {size:,} bytes, over YouTube's "
+                            f"limit of {DESCRIPTION_BYTE_LIMIT:,}. No draft was made.")
+                issues = validate_draft(Draft(video.title, result.description, tuple(video.tags)),
+                                        Draft(video.title, video.description, tuple(video.tags)))
+                errors = [i for i in issues if i.severity == "error"]
+                if errors:
+                    return "error", f"{errors[0].message} No draft was made."
+                edits.save_draft(store, video_id, video.title, result.description, video.tags,
+                                 source="template")
+                return ("ok", f"Applied {assignment.template.name}: " + "; ".join(result.changes) + ". "
+                        "Saved as a draft. Nothing is sent to YouTube until you approve it and push.")
+
+        outcome = await run_in_threadpool(run)
+        if outcome is None:
+            return video_not_found(request)
+        flash(request, *outcome)
+        return see_other(back)
 
     # --- push -------------------------------------------------------------------------------
     def push_page_data() -> dict[str, Any]:

@@ -18,6 +18,7 @@ INTERFACE:
 
 from __future__ import annotations
 
+import hashlib
 import re
 from dataclasses import dataclass
 from typing import Iterable, Mapping, Sequence
@@ -182,6 +183,11 @@ class TrayItem:
     lines: tuple[int, ...]
     text: str
     reason: str
+
+    @property
+    def key(self) -> str:
+        """A short stable name for a form: a hash of the first line number and the text."""
+        return hashlib.sha1(f"{self.lines[0] if self.lines else 0}\n{self.text}".encode("utf-8")).hexdigest()[:10]
 
 
 @dataclass(frozen=True)
@@ -454,6 +460,101 @@ def parse_description(description: str, template: DescriptionTemplate, blocks: S
         sections.append(SectionState(key, kind, name, block_id, state, in_order, lines_of, links))
     return SectionReport(template.id, template.name, tuple(sections), tuple(tray),
                          frozenset(i + 1 for i in taken))
+
+
+# --- Applying a template ----------------------------------------------------------------------------
+
+
+
+@dataclass(frozen=True)
+class ApplyResult:
+    """A description rebuilt in the template's order, what changed in plain English, and the parse it began
+    from (its tray items carry the keys a form names)."""
+
+    description: str
+    changes: tuple[str, ...]
+    changed: bool
+    report: SectionReport
+
+
+def _chunk(lines: Sequence[str], numbers: Iterable[int]) -> list[str]:
+    """The lines with these numbers (from 1), in order. Between two of them, blank lines are kept as they are
+    when only blank lines lie between; when other text lies between, one blank line stands in for it."""
+    nums = sorted(set(numbers))
+    out: list[str] = []
+    for k, n in enumerate(nums):
+        if k:
+            between = list(lines[nums[k - 1]:n - 1])
+            if all(not line.strip() for line in between):
+                out.extend(between)
+            else:
+                out.append("")
+        out.append(lines[n - 1])
+    return out
+
+
+def _rebuild(text: str, template: DescriptionTemplate, blocks: Sequence[TemplateBlock], video: Video,
+             remove: frozenset[str]) -> tuple[str, SectionReport, int]:
+    """One pass: (new text, the parse of `text`, how many non-blank tray lines were removed)."""
+    lines = text.split("\n")
+    report = parse_description(text, template, blocks, video)
+    library = {b.id: b for b in blocks}
+    chunks: list[tuple[str, list[str]]] = []
+    for s in report.sections:
+        if s.kind != "block":
+            if s.lines:
+                chunks.append((s.kind, _chunk(lines, s.lines)))
+            continue
+        block = library.get(s.block_id) if s.block_id is not None else None
+        if block is None or s.state == NOT_SET_UP:
+            continue  # a placeholder is never written
+        if s.state in (OK, WRONG_PLACE):
+            body = _chunk(lines, s.lines)  # found current: the video's lines as they are
+        elif s.state == OUT_OF_DATE:
+            body = block.text.split("\n") + [lines[n - 1] for n in s.link_lines]
+        else:
+            body = block.text.split("\n")  # missing: inserted, without links
+        chunks.append(("block", body))
+    kept = [item for item in report.tray if item.key not in remove]
+    removed = sum(1 for item in report.tray if item.key in remove
+                  for n in item.lines if lines[n - 1].strip())
+    if kept:
+        last_block = max((i + 1 for i, (kind, _) in enumerate(chunks) if kind == "block"), default=None)
+        hashtags = next((i for i, (kind, _) in enumerate(chunks) if kind == "hashtags"), None)
+        at = last_block if last_block is not None else hashtags if hashtags is not None else len(chunks)
+        chunks.insert(at, ("tray", _chunk(lines, (n for item in kept for n in item.lines))))
+    return "\n\n".join("\n".join(body) for _, body in chunks if body), report, removed
+
+
+def apply_template(description: str, template: DescriptionTemplate, blocks: Sequence[TemplateBlock],
+                   video: Video, remove: Iterable[str] = ()) -> ApplyResult:
+    """Rebuild `description` in the template's order. Code only; no new words are written.
+
+    The video's own lines (opening, about, chapters, Watch next, hashtags and every kept tray line) go into
+    the result character for character. Each shared block of the template is written with its current text:
+    found current, its lines stay as they are; found as an old version, it is replaced; missing, it is
+    inserted (a placeholder block never is). A link-slot block keeps the video's own links right under it; a
+    missing one is inserted without links. A missing per-video section stays missing. Tray items (`remove`
+    names the keys of those to drop) are kept together, in their order, right after the last shared block of
+    the result, else just before the hashtags, else last. Sections are separated by exactly one blank line; blank lines
+    inside a section are kept. Windows line endings are read as plain line breaks."""
+    text = description.replace("\r\n", "\n")
+    new, report, removed = _rebuild(text, template, blocks, video, frozenset(remove))
+    changes: list[str] = []
+    for s in report.sections:
+        if s.kind == "block" and s.state == MISSING:
+            changes.append(f"Added {s.name}")
+        elif s.kind == "block" and s.state == OUT_OF_DATE:
+            changes.append(f"Updated {s.name} to the current text")
+        if s.lines and not s.in_order:
+            changes.append(f"Moved {s.name} to its place")
+    if removed:
+        changes.append(f"Removed {removed} line that was not in the template" if removed == 1
+                       else f"Removed {removed} lines that were not in the template")
+    changed = new != text
+    if changed and not changes:
+        changes.append("Put the text in the template's order, with one blank line between sections")
+    return ApplyResult(new, tuple(changes), changed, report)
 
 
 # --- Scoring ---------------------------------------------------------------------------------------

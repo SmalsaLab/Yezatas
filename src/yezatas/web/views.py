@@ -502,6 +502,7 @@ def group_checks(card: Scorecard) -> list[CheckGroup]:
 
 # --- changes (drafts), push confirmation and history ------------------------------------------
 ORIGIN_LABELS = {"manual": "Edited by you", "restore": "Restored text", "bulk-agent": "Bulk edit agent",
+                 "template": "Description template applied",
                  "bulk-ask": "Bulk edit by asking"}
 
 # operation -> plain label, for the quota table on the push page

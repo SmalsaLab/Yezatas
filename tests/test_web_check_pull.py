@@ -173,7 +173,7 @@ def test_pull_does_not_rerun_a_failed_check(tmp_path: Path) -> None:
     ui = ready_ui(tmp_path)
     ui.web._check = CheckState(False, "auth", "Sign in again.")
     resp = ui.post("/configuration/pull")
-    assert "Check the connection first" in resp.text
+    assert "Sign in again." in resp.text and "Check the connection first" not in resp.text
     assert ledger(ui) == []
     assert ui.reader.calls == []
 

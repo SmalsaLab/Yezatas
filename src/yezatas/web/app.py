@@ -85,7 +85,7 @@ from ..youtube import (CaptionReader, CommentReader, CommentWriter, GoogleCaptio
 from . import upload as upload_mod
 from .clientfile import (MAX_CLIENT_FILE_BYTES, ClientFileError, ClientInfo,
                          parse_client_file, read_saved_client, save_client_file)
-from .guidance import NeedsSignIn, map_api_error, map_sign_in_error
+from .guidance import SIGN_IN_REJECTED, NeedsSignIn, map_api_error, map_sign_in_error
 from .competitors_view import build_competitor_cards, build_insight_view
 from .searchgaps_view import build_gap_rows, build_ranking_view
 from .analytics_view import build_analytics
@@ -93,7 +93,7 @@ from .today_view import build_today
 from .thumbswap_view import build_swap_rows
 from .jobs import Job, JobSnapshot, Report
 from .security import CSRF_FIELD, Sessions, install_security, load_session_key, verify_csrf
-from .steps import CheckState, compute_steps, estimate_pull_units
+from .steps import CheckState, compute_steps, estimate_pull_units, sign_in_rejected
 from ..validate import DESCRIPTION_BYTE_LIMIT, TITLE_LIMIT, Draft, validate_draft
 from .views import (API_LIMITS, BULK_EXAMPLES, STARTER_QUESTIONS, build_agent_session, build_posted_rows, Entry, PreviewChoice, RunView, SuggestBatch, SuggestItem,
                     affiliate_apply_message, build_adcheck_view, build_shorts_view, build_affiliate_preview,
@@ -2317,6 +2317,7 @@ def create_app(
             used, remaining = guard.used(), guard.remaining()
         steps = compute_steps(client, client_problem, signed_in, signin, check, pull,
                               latest is not None)
+        rejected = sign_in_rejected(signed_in, check, pull)
         # Steps 1 to 4 cannot be detected, so once the client file is valid the next action is
         # further down the list.
         candidates = steps[5:] if client else steps
@@ -2330,7 +2331,8 @@ def create_app(
             "client": client, "client_exists": config.client_secrets_path.exists(),
             "client_path": str(config.client_secrets_path),
             "api_url": _api_page_url(client),
-            "signed_in": signed_in, "can_edit": signed_in and auth.can_edit(config), "signin": signin, "pull": pull, "check": check,
+            "signed_in": signed_in, "sign_in_rejected": rejected, "sign_in_rejected_text": SIGN_IN_REJECTED,
+            "can_edit": signed_in and auth.can_edit(config), "signin": signin, "pull": pull, "check": check,
             "estimate": estimate,
             "latest_pull": ({"videos": latest[0], "when": _local_time(latest[1])}
                             if latest else None),
@@ -3559,7 +3561,8 @@ def create_app(
         if client is None:
             state.add_flash(sid, "error", "Add the OAuth client file first (step 5).", "client")
             return back_to_setup("client")
-        if config.token_path.is_file():
+        # A saved sign-in Google rejects may be replaced by signing in again; a working one may not.
+        if config.token_path.is_file() and not sign_in_rejected(True, state.check, state.pull_job.snapshot()):
             state.add_flash(sid, "error", "You are already signed in. Sign out first to switch "
                             "accounts.", "signin")
             return back_to_setup("signin")
@@ -3606,6 +3609,11 @@ def create_app(
         if check is None and config.token_path.is_file():
             # After a restart: check again on its own (1 quota unit), then pull.
             check = await run_in_threadpool(state.run_check)
+        if check is not None and not check.ok and check.message:
+            # The check's own sentence, and the step that fixes it: sign in again for a rejected sign-in.
+            target = "signin" if check.kind == "auth" else "check"
+            state.add_flash(sid, "error", check.message, target)
+            return go_back(target)
         if check is None or not check.ok or not check.has_uploads:
             state.add_flash(sid, "error", "Check the connection first (step 7).", "check")
             return go_back("check")

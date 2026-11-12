@@ -49,6 +49,11 @@ class FakeYouTubeReader:
         self.page_size = page_size
         self.has_channel = has_channel
         self.calls: list[tuple[str, Any]] = []
+        # the channel's own playlists (none unless a test adds them): dicts with "id", "title", "video_ids"
+        # and, optionally, "item_count" (what playlists.list reports, when it differs from the real count)
+        self.playlists: list[dict[str, Any]] = []
+        self.playlist_errors: dict[str, Exception] = {}  # playlist id -> raised by playlist_items
+        self.playlists_error: Exception | None = None  # raised by playlists_mine
 
     def channels_mine(self, part: str) -> dict[str, Any]:
         self.calls.append(("channels_mine", part))
@@ -68,14 +73,31 @@ class FakeYouTubeReader:
                                      "subscriberCount": "321"}
         return {"items": [channel]}
 
+    def playlists_mine(self, page_token: str | None) -> dict[str, Any]:
+        self.calls.append(("playlists_mine", page_token))
+        if self.playlists_error is not None:
+            raise self.playlists_error
+        start = int(page_token) if page_token else 0
+        chunk = self.playlists[start:start + self.page_size]
+        response: dict[str, Any] = {"items": [
+            {"id": p["id"], "snippet": {"title": p["title"], "channelId": CHANNEL_ID},
+             "contentDetails": {"itemCount": p.get("item_count", len(p["video_ids"]))}} for p in chunk]}
+        if start + self.page_size < len(self.playlists):
+            response["nextPageToken"] = str(start + self.page_size)
+        return response
+
     def playlist_items(self, playlist_id: str, page_token: str | None) -> dict[str, Any]:
         self.calls.append(("playlist_items", (playlist_id, page_token)))
-        assert playlist_id == UPLOADS_ID
+        if playlist_id == UPLOADS_ID:
+            ids = [i["id"] for i in self.items]
+        else:
+            if playlist_id in self.playlist_errors:
+                raise self.playlist_errors[playlist_id]
+            ids = list(next(p for p in self.playlists if p["id"] == playlist_id)["video_ids"])
         start = int(page_token) if page_token else 0
-        chunk = self.items[start:start + self.page_size]
-        response: dict[str, Any] = {
-            "items": [{"contentDetails": {"videoId": i["id"]}} for i in chunk]}
-        if start + self.page_size < len(self.items):
+        chunk = ids[start:start + self.page_size]
+        response: dict[str, Any] = {"items": [{"contentDetails": {"videoId": vid}} for vid in chunk]}
+        if start + self.page_size < len(ids):
             response["nextPageToken"] = str(start + self.page_size)
         return response
 

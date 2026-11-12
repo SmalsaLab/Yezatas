@@ -63,6 +63,8 @@ class YouTubeReader(Protocol):
 
     def videos(self, ids: Sequence[str], part: str) -> dict[str, Any]: ...
 
+    def playlists_mine(self, page_token: str | None) -> dict[str, Any]: ...
+
 
 class GoogleYouTubeReader:
     """YouTubeReader backed by google-api-python-client. Thin on purpose; not unit-tested."""
@@ -91,6 +93,14 @@ class GoogleYouTubeReader:
         if not 1 <= len(ids) <= MAX_RESULTS:
             raise ValueError(f"videos.list takes 1 to {MAX_RESULTS} ids, got {len(ids)}")
         return self._service.videos().list(part=part, id=",".join(ids)).execute()
+
+    def playlists_mine(self, page_token: str | None) -> dict[str, Any]:
+        """playlists.list for the signed-in channel (1 unit a page): titles and item counts."""
+        return (
+            self._service.playlists()
+            .list(part="snippet,contentDetails", mine=True, maxResults=MAX_RESULTS, pageToken=page_token)
+            .execute()
+        )
 
 
 class CommentReader(Protocol):

@@ -32,7 +32,7 @@ def clock() -> Clock:
 
 
 def test_cost_table() -> None:
-    expected = {"videos.list": 1, "channels.list": 1, "playlistItems.list": 1,
+    expected = {"videos.list": 1, "channels.list": 1, "playlistItems.list": 1, "playlists.list": 1,
                 "commentThreads.list": 1, "videos.update": 50, "thumbnails.set": 50, "captions.list": 50,
                 "captions.download": 200, "captions.insert": 400, "captions.update": 450,
                 "comments.insert": 50, "commentThreads.insert": 50}

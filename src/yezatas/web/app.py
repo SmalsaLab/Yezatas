@@ -54,11 +54,14 @@ from .. import captions as captions_mod
 from .. import soundtags as soundtags_mod
 from .. import primaryai, translate
 from ..catalog import NoChannelError, PullResult, pull_catalog
+from ..playlistpull import PlaylistPullResult, pull_playlists
 from ..config import PRIMARY_AI_CHOICES, Config, ensure_dirs
 from .. import affiliate as affiliate_mod
 from .. import bulkagent as bulkagent_mod
 from .. import comments as comments_mod
 from .. import customchecks as customchecks_mod
+from .. import descriptiontemplate as descriptiontemplate_mod
+from .. import templatebuild as templatebuild_mod
 from .. import glossary as glossary_mod
 from .. import replytemplates as replytemplates_mod
 from .. import postreply as postreply_mod
@@ -66,9 +69,13 @@ from ..quota import QuotaExceeded, QuotaGuard
 from ..seo import TAGS_CHAR_LIMIT, CategoryJudgment, parse_duration, score_catalog, tags_char_count, video_category_id
 from .videofacts import build_facts
 from .views import stale_youtube_keys
+from .views import TemplateData, listing_back
 from .video_analytics_view import build_video_analytics
 from .category_view import build_category_view
 from .pinned_view import build_pinned_view
+from . import template_view as template_view_mod
+from . import template_build_view as template_build_view_mod
+from . import template_sections_view as template_sections_view_mod
 from .nav_counts import build_nav_counts
 from ..store import AdCheck, CategoryCheck, OutlierReport, PinnedComment, ShortsFind, Store, ThumbnailVariant
 from ..subtitles import to_srt
@@ -87,7 +94,7 @@ from .thumbswap_view import build_swap_rows
 from .jobs import Job, JobSnapshot, Report
 from .security import CSRF_FIELD, Sessions, install_security, load_session_key, verify_csrf
 from .steps import CheckState, compute_steps, estimate_pull_units
-from ..validate import DESCRIPTION_BYTE_LIMIT, TITLE_LIMIT
+from ..validate import DESCRIPTION_BYTE_LIMIT, TITLE_LIMIT, Draft, validate_draft
 from .views import (API_LIMITS, BULK_EXAMPLES, STARTER_QUESTIONS, build_agent_session, build_posted_rows, Entry, PreviewChoice, RunView, SuggestBatch, SuggestItem,
                     affiliate_apply_message, build_adcheck_view, build_shorts_view, build_affiliate_preview,
                     build_agent_review, build_bulk_preview, build_channel_comments_view, build_checks_view, build_comments_view, build_copilot_turns, build_glossary_rows, build_links_view, build_listing,
@@ -219,6 +226,7 @@ CHANNEL_SORT_TIMEOUT_MESSAGE = (
 CHANNEL_COMMENTS_PATH = "/comments"
 NO_PACKAGING_KEY = "There is no Meta API key. Add one in Configuration. Nothing was sent."
 MAX_ID_DIGITS = 12  # a variant id in a URL; longer is never a real one
+MAX_BULK_TEMPLATE = 200  # videos one Set template on the Videos table may change
 MAX_PATH_CHARS = 1000
 UPLOADS_DIR = "tmp/uploads"  # under the Yezatas home: the video files the browser handed over
 LOCAL_NO_KEY_MESSAGE = (
@@ -1020,6 +1028,7 @@ class WebState:
         self._thumb_page = ""  # the page that started the swap
         self._lock = threading.Lock()
         self._check_lock = threading.Lock()
+        self._playlist_pull_lock = threading.Lock()  # one playlist pull at a time
         self._check: CheckState | None = None
         self._flash: dict[str, list[tuple[str, str, str]]] = {}
 
@@ -1107,6 +1116,21 @@ class WebState:
                 return pull_catalog(reader, store, guard)
 
         return self.pull_job.start(work)
+
+    def run_playlist_pull(self) -> PlaylistPullResult | None:
+        """Read the channel's playlists in this (worker) thread; None if a playlist pull is already running.
+        Raises what the catalog pull raises (NeedsSignIn, QuotaExceeded, HttpError, ...)."""
+        if not self._playlist_pull_lock.acquire(blocking=False):
+            return None
+        try:
+            creds = self._credentials_loader(self.config)
+            if creds is None:
+                raise NeedsSignIn()
+            reader = self._reader_factory(creds)
+            with Store(self.config.catalog_db) as store:
+                return pull_playlists(reader, store, QuotaGuard(store, self.config.daily_quota_budget))
+        finally:
+            self._playlist_pull_lock.release()
 
     # --- write access and push --------------------------------------------------------------
     def write_credentials(self) -> Any:
@@ -2338,14 +2362,20 @@ def create_app(
                       for vid, c in store.category_checks().items() if c.status == "done"}
             # A comment from the channel among the fetched ones, or the user's "I pinned one already".
             pinned_states = store.pinned_states()
+            # How each description follows its template, and the length of its own text.
+            template_judgments, own_chars = descriptiontemplate_mod.judge_catalog(store, videos)
+            template_names = [(t.id, t.name) for t in store.list_description_templates()]
             guard = QuotaGuard(store, config.daily_quota_budget)
             used, remaining = guard.used(), guard.remaining()
             pull = store.latest_pull()
-        entries = make_entries(videos, score_catalog(videos, stale, judged, pinned_states))
+        entries = make_entries(videos, score_catalog(videos, stale, judged, pinned_states,
+                                                     templates=template_judgments, own_chars=own_chars))
         return {
             "entries": entries, "as_of": pull_moment(pull) if pull is not None else None, "stale": stale,
             "latest_pull": {"videos": latest[0], "when": _local_time(latest[1])},
             "quota": {"used": used, "remaining": remaining, "budget": config.daily_quota_budget},
+            # the same judgments the scores used, for the Videos table's Template column and filter
+            "templates": TemplateData(template_names, template_judgments),
         }
 
     def outlier_scores(data: dict[str, Any]) -> list[outliers_mod.OutlierScore]:
@@ -2773,7 +2803,7 @@ def create_app(
         if data is None:
             return back_to_setup()
         scores = {s.video_id: s for s in outlier_scores(data)}
-        listing = build_listing(data["entries"], dict(request.query_params), scores)
+        listing = build_listing(data["entries"], dict(request.query_params), scores, data["templates"])
         return render(request, "videos.html", {"active": "content", "listing": listing,
                                                "q": listing.q, "draft_ids": draft_ids()})
 
@@ -2833,7 +2863,14 @@ def create_app(
             pinned_record = store.pinned_comment(video_id)
             current_hash = adcheck_mod.current_source_hash(store, video_id)
         vs = video_stats_card(video_id, parse_duration(video.duration))
+        with Store(config.catalog_db) as store:
+            tsv = template_sections_view_mod.build_sections_view(
+                video, text[1], row is not None, store.list_description_templates(),
+                store.list_template_blocks(), store.template_choices(), store.templates_include_shorts(),
+                store.playlist_memberships(), {p.playlist_id: p.title for p in store.playlists()},
+                dict(request.query_params))
         return render(request, "video.html", {
+            "tsv": tsv,
             "ac": ac, "av": build_adcheck_view(stored_check, current_hash, _local_time),
             "sp": sh, "sr": build_shorts_view(video_id, stored_shorts, transcript.id if transcript else 0,
                             _local_time),
@@ -3695,6 +3732,136 @@ def create_app(
               "and push.")
         return see_other(f"/changes#d-{quote(video_id)}")
 
+    # --- description template on the video page (phase 2c): the menu and Apply; Apply only saves a draft ---
+    def template_back(video_id: str, view: str = "") -> str:
+        query = f"?view={view}" if view in (template_sections_view_mod.SECTIONS, template_sections_view_mod.TEXT) else ""
+        return f"/videos/{quote(video_id)}{query}#edit"
+
+    @app.post("/videos/template")
+    async def set_videos_template(request: Request) -> Response:
+        """Set the template choice of the videos ticked on the Videos table, then go back to the same list."""
+        form = await read_form(request)
+        choice = str(form.get("choice") or "")
+        ids = list(dict.fromkeys(str(v) for v in form.getlist("video") if str(v)))
+        list_params = {k: str(form.get(k) or "") for k in
+                       ("q", "sort", "dir", "visibility", "band", "check", "outliers", "template", "page")}
+
+        def run() -> tuple[str, tuple[str, str]]:
+            with Store(config.catalog_db) as store:
+                template_ids = [t.id for t in store.list_description_templates()]
+                back = listing_back(list_params, template_ids)
+                if not ids:
+                    return back, ("error", "Tick at least one video.")
+                if not choice:
+                    return back, ("error", "Choose a template first.")
+                if len(ids) > MAX_BULK_TEMPLATE:
+                    return back, ("error", f"Tick at most {MAX_BULK_TEMPLATE} videos at once.")
+                found = None
+                if choice not in (template_sections_view_mod.AUTO, template_sections_view_mod.EXCLUDE):
+                    wanted = _template_id(choice)
+                    found = store.get_description_template(wanted) if wanted is not None else None
+                    if found is None:
+                        return back, ("error", "That template does not exist.")
+                known = [vid for vid in ids if store.get_video(vid) is not None]
+                for vid in known:
+                    if found is not None:
+                        store.set_template_choice(vid, found.id)
+                    elif choice == template_sections_view_mod.EXCLUDE:
+                        store.exclude_from_templates(vid)
+                    else:
+                        store.clear_template_choice(vid)
+            n = len(known)
+            if not n:
+                return back, ("error", "None of the ticked videos are in the catalog.")
+            videos = f"{n} video{'' if n == 1 else 's'}"
+            if found is not None:
+                text = f"Set {videos} to {found.name}."
+            elif choice == template_sections_view_mod.EXCLUDE:
+                text = f"Left {videos} out of templates."
+            else:
+                text = f"{videos} {'now follows' if n == 1 else 'now follow'} the automatic choice."
+            skipped = len(ids) - n
+            if skipped:
+                text += (f" Skipped {skipped} video{'' if skipped == 1 else 's'} "
+                         f"that {'is' if skipped == 1 else 'are'} not in the catalog.")
+            return back, ("ok", text)
+
+        back, outcome = await run_in_threadpool(run)
+        flash(request, *outcome)
+        return see_other(back)
+
+    @app.post("/videos/{video_id}/template")
+    async def set_video_template(request: Request, video_id: str) -> Response:
+        form = await read_form(request)
+        choice = str(form.get("choice") or "")
+        back = template_back(video_id, str(form.get("view") or ""))
+
+        def run() -> tuple[str, str] | None:
+            with Store(config.catalog_db) as store:
+                if store.get_video(video_id) is None:
+                    return None
+                if choice == template_sections_view_mod.AUTO:
+                    store.clear_template_choice(video_id)
+                    return "ok", "This video now follows the automatic choice."
+                if choice == template_sections_view_mod.EXCLUDE:
+                    store.exclude_from_templates(video_id)
+                    return "ok", "This video is now left out of description templates."
+                wanted = _template_id(choice)
+                found = store.get_description_template(wanted) if wanted is not None else None
+                if found is None:
+                    return "error", "That template does not exist."
+                store.set_template_choice(video_id, found.id)
+                return "ok", f"This video now follows {found.name}."
+
+        outcome = await run_in_threadpool(run)
+        if outcome is None:
+            return video_not_found(request)
+        flash(request, *outcome)
+        return see_other(back)
+
+    @app.post("/videos/{video_id}/template/apply")
+    async def apply_video_template(request: Request, video_id: str) -> Response:
+        form = await read_form(request)
+        remove = frozenset(str(v) for v in form.getlist("remove"))
+        back = template_back(video_id, template_sections_view_mod.SECTIONS)
+
+        def run() -> tuple[str, str] | None:
+            with Store(config.catalog_db) as store:
+                video = store.get_video(video_id)
+                if video is None:
+                    return None
+                if store.get_draft(video_id) is not None:
+                    return "error", "This video already has a draft. Push or discard it first."
+                assignment = descriptiontemplate_mod.assign_template(
+                    video, store.list_description_templates(), store.template_choices(),
+                    store.templates_include_shorts(), store.playlist_memberships(),
+                    {p.playlist_id: p.title for p in store.playlists()})
+                if assignment.template is None:
+                    return "error", f"{assignment.reason} No template was applied."
+                result = descriptiontemplate_mod.apply_template(
+                    video.description, assignment.template, store.list_template_blocks(), video, remove)
+                if not result.changed:
+                    return "info", f"This description already follows {assignment.template.name}."
+                size = len(result.description.encode("utf-8"))
+                if size > DESCRIPTION_BYTE_LIMIT:
+                    return ("error", f"With the template the description would be {size:,} bytes, over YouTube's "
+                            f"limit of {DESCRIPTION_BYTE_LIMIT:,}. No draft was made.")
+                issues = validate_draft(Draft(video.title, result.description, tuple(video.tags)),
+                                        Draft(video.title, video.description, tuple(video.tags)))
+                errors = [i for i in issues if i.severity == "error"]
+                if errors:
+                    return "error", f"{errors[0].message} No draft was made."
+                edits.save_draft(store, video_id, video.title, result.description, video.tags,
+                                 source="template")
+                return ("ok", f"Applied {assignment.template.name}: " + "; ".join(result.changes) + ". "
+                        "Saved as a draft. Nothing is sent to YouTube until you approve it and push.")
+
+        outcome = await run_in_threadpool(run)
+        if outcome is None:
+            return video_not_found(request)
+        flash(request, *outcome)
+        return see_other(back)
+
     # --- push -------------------------------------------------------------------------------
     def push_page_data() -> dict[str, Any]:
         push_snap = state.push_snapshot()
@@ -4125,6 +4292,371 @@ def create_app(
         kind, message = await run_in_threadpool(work)
         flash(request, kind, message)
         return see_other("/replies")
+
+    # --- description templates (phase 2a): the page and its actions; nothing here reaches YouTube --------
+    # What a form held when the store refused it, per session, shown once on the next page (like a flash).
+    typed_forms: dict[str, dict[str, dict[str, str]]] = {}
+    typed_lock = threading.Lock()
+
+    def keep_typed(request: Request, form_key: str, values: dict[str, str]) -> None:
+        with typed_lock:
+            typed_forms.setdefault(request.state.session_id, {})[form_key] = values
+
+    def pop_typed(request: Request) -> dict[str, dict[str, str]]:
+        with typed_lock:
+            return typed_forms.pop(request.state.session_id, {})
+
+    def templates_target(template_id: int | None, anchor: str = "template") -> str:
+        url = template_view_mod.PAGE_URL
+        if template_id is not None:
+            url += f"?template={template_id}"
+        return url + (f"#{anchor}" if anchor else "")
+
+    def existing_template(store: Store, template_id: int | None) -> Any:
+        found = store.get_description_template(template_id) if template_id is not None else None
+        if found is None:
+            raise ValueError("That template does not exist.")
+        return found
+
+    async def template_action(request: Request, work: Callable[[Store, Any], tuple[str, str, str]],
+                              form_key: str = "", keep: Sequence[str] = (), anchor: str = "template") -> Response:
+        """Run one action: `work(store, form)` returns (kind, message, where to go back). A ValueError
+        becomes an error flash with its sentence, and the fields in `keep` are shown again as typed."""
+        form = await read_form(request)
+        back_id = _template_id(str(form.get("template") or ""))
+
+        def run() -> tuple[str, str, str]:
+            with Store(config.catalog_db) as store:
+                try:
+                    return work(store, form)
+                except ValueError as exc:
+                    if back_id is not None and store.get_description_template(back_id) is None:
+                        return "error", str(exc), templates_target(None)
+                    return "error", str(exc), templates_target(back_id, anchor)
+
+        kind, message, target = await run_in_threadpool(run)
+        if kind == "error" and form_key:
+            keep_typed(request, form_key, {k: str(form.get(k) or "") for k in keep})
+        if message:
+            flash(request, kind, message)
+        return see_other(target)
+
+    @app.get(template_view_mod.PAGE_URL)
+    def description_templates_page(request: Request) -> Response:
+        with Store(config.catalog_db) as store:
+            videos = store.list_videos()
+            blocks = store.list_template_blocks()
+            dtemplates = store.list_description_templates()
+            choices = store.template_choices()
+            include_shorts = store.templates_include_shorts()
+            playlists = store.playlists()
+            judgments, _ = descriptiontemplate_mod.judge_catalog(store, videos)
+        view = template_view_mod.build_templates_page(videos, blocks, dtemplates, choices, include_shorts,
+                                                      playlists, judgments, dict(request.query_params),
+                                                      pop_typed(request))
+        return render(request, "description_templates.html", {"active": "description_templates", "tp": view})
+
+    # --- Build from my channel (phase 2b): repeated description text offered as shared blocks -----------
+    def build_scan(store: Store) -> tuple[list[Any], Any]:
+        videos = store.list_videos()
+        return videos, templatebuild_mod.scan(videos, store.list_template_blocks(),
+                                              store.templates_include_shorts())
+
+    @app.get(template_build_view_mod.BUILD_URL)
+    def description_templates_build_page(request: Request) -> Response:
+        with Store(config.catalog_db) as store:
+            videos, result = build_scan(store)
+            blocks = store.list_template_blocks()
+        view = template_build_view_mod.build_page(videos, result, blocks, dict(request.query_params),
+                                                  pop_typed(request))
+        return render(request, "description_templates_build.html",
+                      {"active": "description_templates", "bp": view})
+
+    @app.post(template_build_view_mod.BUILD_URL + "/add")
+    async def description_templates_build_add(request: Request) -> Response:
+        form = await read_form(request)
+        key = str(form.get("key") or "")
+        typed = {k: str(form.get(k) or "") for k in ("name", "link_slot", "remember")}
+        back = template_build_view_mod.BUILD_URL
+
+        def run() -> tuple[str, str, str]:
+            with Store(config.catalog_db) as store:
+                _, result = build_scan(store)
+                found = next((c for c in result.candidates if c.key == key), None)
+                if found is None:
+                    return "error", "That text is no longer repeated on your videos.", back
+                if found.already_older:
+                    return ("info", f"An older version of that text is already the shared block {found.already}.",
+                            back + f"#build-{key}")
+                if found.already:
+                    return "info", f"That text is already the shared block {found.already}.", back + f"#build-{key}"
+                # The server's own text, never the form's. Older versions go in first, least carried first (the
+                # reverse of the order shown), so the store keeps them newest first; the main text goes in last.
+                texts = [found.text]
+                if typed["remember"] == "1":
+                    texts = [text for text, _ in reversed(found.versions)] + texts
+                link_slot = typed["link_slot"] == "1"
+                placeholder = templatebuild_mod.placeholder_block(store.list_template_blocks(), typed["name"])
+                try:
+                    block_id = store.add_template_block(typed["name"], texts[0], link_slot=link_slot)
+                except ValueError as exc:
+                    return "error", str(exc), back + f"#build-{key}"
+                try:
+                    for text in texts[1:]:
+                        store.update_template_block(block_id, text=text)
+                except ValueError as exc:
+                    store.delete_template_block(block_id)
+                    return "error", str(exc), back + f"#build-{key}"
+                if placeholder is None:
+                    return "ok", "", back + f"?added={block_id}#build-{key}"
+                # A block with this name still holds its starter placeholder: fill that block instead (same id,
+                # so the templates that use it keep working). Every text went through the store above, so these
+                # updates cannot be refused halfway; the placeholder left in its old versions is never matched.
+                store.delete_template_block(block_id)
+                for n, text in enumerate(texts):
+                    store.update_template_block(placeholder.id, text=text, link_slot=link_slot if n == 0 else None)
+                return "ok", "", back + f"?added={placeholder.id}&filled=1#build-{key}"
+
+        kind, message, target = await run_in_threadpool(run)
+        if kind == "error":
+            keep_typed(request, f"build:{key}", typed)
+        if message:
+            flash(request, kind, message)
+        return see_other(target)
+
+    @app.post(template_view_mod.PAGE_URL + "/start")
+    async def start_description_templates(request: Request) -> Response:
+        def work(store: Store, form: Any) -> tuple[str, str, str]:
+            if store.list_description_templates():
+                return "info", "You already have a template, so nothing was added.", templates_target(None)
+            by_name = {b.name.casefold(): b.id for b in store.list_template_blocks()}
+            sections: list[dict[str, Any]] = []
+            for section in descriptiontemplate_mod.STARTER_SECTIONS:
+                if section["kind"] != "block":
+                    sections.append({"kind": section["kind"]})
+                    continue
+                name = str(section["name"])
+                block_id = by_name.get(name.casefold())
+                if block_id is None:
+                    block_id = store.add_template_block(name, descriptiontemplate_mod.STARTER_PLACEHOLDERS[name],
+                                                        link_slot=bool(section.get("link_slot")))
+                sections.append({"kind": "block", "block_id": block_id})
+            new_id = store.add_description_template(template_view_mod.STARTER_NAME, sections, is_default=True)
+            return ("ok", "Added the suggested template. Replace the text of its shared blocks with your own.",
+                    templates_target(new_id))
+
+        return await template_action(request, work)
+
+    @app.post(template_view_mod.PAGE_URL + "/new")
+    async def new_description_template(request: Request) -> Response:
+        def work(store: Store, form: Any) -> tuple[str, str, str]:
+            sections: Sequence[dict[str, Any]] = ()
+            if str(form.get("start") or "") == "copy":
+                sections = existing_template(store, _template_id(str(form.get("template") or ""))).sections
+            new_id = store.add_description_template(str(form.get("name") or ""), sections)
+            return "ok", "Template added.", templates_target(new_id)
+
+        return await template_action(request, work, "new", ("name", "start"), "new-template")
+
+    @app.post(template_view_mod.PAGE_URL + "/settings")
+    async def description_template_settings(request: Request) -> Response:
+        def work(store: Store, form: Any) -> tuple[str, str, str]:
+            include = str(form.get("include_shorts") or "") == "1"
+            store.set_templates_include_shorts(include)
+            message = "Shorts now follow templates." if include else "Shorts are now left out of templates."
+            return "ok", message, templates_target(_template_id(str(form.get("template") or "")), "settings")
+
+        return await template_action(request, work, anchor="settings")
+
+    @app.post(template_view_mod.PAGE_URL + "/{template_id}/rename")
+    async def rename_description_template(request: Request, template_id: str) -> Response:
+        wanted = _template_id(template_id)
+
+        def work(store: Store, form: Any) -> tuple[str, str, str]:
+            existing_template(store, wanted)
+            store.update_description_template(wanted, name=str(form.get("name") or ""))  # type: ignore[arg-type]
+            return "ok", "Template renamed.", templates_target(wanted)
+
+        return await template_action(request, work, "rename", ("name",))
+
+    @app.post(template_view_mod.PAGE_URL + "/{template_id}/default")
+    async def default_description_template(request: Request, template_id: str) -> Response:
+        wanted = _template_id(template_id)
+
+        def work(store: Store, form: Any) -> tuple[str, str, str]:
+            found = existing_template(store, wanted)
+            store.set_default_template(found.id)
+            return "ok", f"\"{found.name}\" is now the default template.", templates_target(found.id)
+
+        return await template_action(request, work)
+
+    @app.post(template_view_mod.PAGE_URL + "/{template_id}/delete")
+    async def delete_description_template(request: Request, template_id: str) -> Response:
+        wanted = _template_id(template_id)
+
+        def work(store: Store, form: Any) -> tuple[str, str, str]:
+            found = existing_template(store, wanted)
+            picked = sum(1 for v in store.template_choices().values() if v == found.id)
+            store.delete_description_template(found.id)
+            extra = (f" {picked} hand-picked {'choice' if picked == 1 else 'choices'} went with it."
+                     if picked else "")
+            return "ok", f"Deleted \"{found.name}\".{extra}", templates_target(None)
+
+        return await template_action(request, work)
+
+    @app.post(template_view_mod.PAGE_URL + "/{template_id}/move")
+    async def move_description_template(request: Request, template_id: str) -> Response:
+        wanted = _template_id(template_id)
+
+        def work(store: Store, form: Any) -> tuple[str, str, str]:
+            found = existing_template(store, wanted)
+            ids = [t.id for t in store.list_description_templates()]
+            store.reorder_description_templates(
+                template_view_mod.moved(ids, ids.index(found.id), str(form.get("direction") or "")))
+            return "ok", "Priority changed.", templates_target(found.id)
+
+        return await template_action(request, work)
+
+    @app.post(template_view_mod.PAGE_URL + "/playlists/pull")
+    async def pull_description_template_playlists(request: Request) -> Response:
+        """Read the channel's playlists from YouTube (read only) and store them, in this request."""
+        form = await read_form(request)
+        target = templates_target(_template_id(str(form.get("template") or "")), "rules")
+        try:
+            result = await run_in_threadpool(state.run_playlist_pull)
+        except Exception as exc:  # noqa: BLE001 - shown as the catalog pull shows it
+            flash(request, "error", map_api_error(exc)[1])
+            return see_other(target)
+        if result is None:
+            flash(request, "error", "Playlists are already being pulled.")
+            return see_other(target)
+        message = (f"Read {result.playlists} {'playlist' if result.playlists == 1 else 'playlists'} with "
+                   f"{result.items} {'video' if result.items == 1 else 'videos'}. "
+                   f"Used {result.units_used} quota {'unit' if result.units_used == 1 else 'units'}.")
+        if result.skipped:
+            message += (f" YouTube did not let Yezatas read {len(result.skipped)} "
+                        f"{'playlist' if len(result.skipped) == 1 else 'playlists'}: "
+                        + ", ".join(result.skipped) + ".")
+        flash(request, "ok", message)
+        return see_other(target)
+
+    @app.post(template_view_mod.PAGE_URL + "/{template_id}/rules/add")
+    async def add_description_template_rule(request: Request, template_id: str) -> Response:
+        wanted = _template_id(template_id)
+
+        def work(store: Store, form: Any) -> tuple[str, str, str]:
+            found = existing_template(store, wanted)
+            kind, value = str(form.get("kind") or ""), str(form.get("value") or "")
+            if kind == "playlist" and value not in {p.playlist_id for p in store.playlists()}:
+                raise ValueError("Choose one of your playlists.")
+            store.update_description_template(found.id, rules=[*found.rules, {"kind": kind, "value": value}])
+            return "ok", "Rule added.", templates_target(found.id, "rules")
+
+        return await template_action(request, work, "rules", ("kind", "value"), "rules")
+
+    @app.post(template_view_mod.PAGE_URL + "/{template_id}/rules/remove")
+    async def remove_description_template_rule(request: Request, template_id: str) -> Response:
+        wanted = _template_id(template_id)
+
+        def work(store: Store, form: Any) -> tuple[str, str, str]:
+            found = existing_template(store, wanted)
+            target = {"kind": str(form.get("kind") or ""), "value": str(form.get("value") or "")}
+            if target not in found.rules:
+                raise ValueError("That rule is not in this template.")
+            rules = list(found.rules)
+            rules.remove(target)
+            store.update_description_template(found.id, rules=rules)
+            return "ok", "Rule removed.", templates_target(found.id, "rules")
+
+        return await template_action(request, work, anchor="rules")
+
+    @app.post(template_view_mod.PAGE_URL + "/{template_id}/sections/add")
+    async def add_description_template_section(request: Request, template_id: str) -> Response:
+        wanted = _template_id(template_id)
+
+        def work(store: Store, form: Any) -> tuple[str, str, str]:
+            found = existing_template(store, wanted)
+            section = template_view_mod.parse_section(str(form.get("section") or ""))
+            store.update_description_template(found.id, sections=[*found.sections, section])
+            return "ok", "Section added at the end. Move it to its place.", templates_target(found.id, "sections")
+
+        return await template_action(request, work, anchor="sections")
+
+    def _section_index(found: Any, key: str) -> int:
+        keys = [template_view_mod.section_key(s) for s in found.sections]
+        if key not in keys:
+            raise ValueError("That section is not in this template.")
+        return keys.index(key)
+
+    @app.post(template_view_mod.PAGE_URL + "/{template_id}/sections/move")
+    async def move_description_template_section(request: Request, template_id: str) -> Response:
+        wanted = _template_id(template_id)
+
+        def work(store: Store, form: Any) -> tuple[str, str, str]:
+            found = existing_template(store, wanted)
+            index = _section_index(found, str(form.get("section") or ""))
+            store.update_description_template(found.id, sections=template_view_mod.moved(
+                found.sections, index, str(form.get("direction") or "")))
+            return "ok", "Section moved.", templates_target(found.id, "sections")
+
+        return await template_action(request, work, anchor="sections")
+
+    @app.post(template_view_mod.PAGE_URL + "/{template_id}/sections/remove")
+    async def remove_description_template_section(request: Request, template_id: str) -> Response:
+        wanted = _template_id(template_id)
+
+        def work(store: Store, form: Any) -> tuple[str, str, str]:
+            found = existing_template(store, wanted)
+            index = _section_index(found, str(form.get("section") or ""))
+            store.update_description_template(
+                found.id, sections=[s for n, s in enumerate(found.sections) if n != index])
+            return "ok", "Section removed.", templates_target(found.id, "sections")
+
+        return await template_action(request, work, anchor="sections")
+
+    @app.post(template_view_mod.PAGE_URL + "/blocks/add")
+    async def add_shared_block(request: Request) -> Response:
+        def work(store: Store, form: Any) -> tuple[str, str, str]:
+            store.add_template_block(str(form.get("name") or ""), str(form.get("text") or ""),
+                                     link_slot=str(form.get("link_slot") or "") == "1")
+            return "ok", "Shared block added.", templates_target(_template_id(str(form.get("template") or "")),
+                                                                 "blocks")
+
+        return await template_action(request, work, "blocks:add", ("name", "text", "link_slot"), "block-add")
+
+    @app.post(template_view_mod.PAGE_URL + "/blocks/{block_id}/edit")
+    async def edit_shared_block(request: Request, block_id: str) -> Response:
+        wanted = _template_id(block_id)
+
+        def work(store: Store, form: Any) -> tuple[str, str, str]:
+            before = store.get_template_block(wanted) if wanted is not None else None
+            if before is None:
+                raise ValueError("That block does not exist.")
+            store.update_template_block(before.id, name=str(form.get("name") or ""),
+                                        text=str(form.get("text") or ""),
+                                        link_slot=str(form.get("link_slot") or "") == "1")
+            after = store.get_template_block(before.id)
+            message = "Shared block saved."
+            if after is not None and after.text != before.text:
+                message += (" The old text is remembered, so videos that still carry it show as out of date "
+                            "instead of missing.")
+            return "ok", message, templates_target(_template_id(str(form.get("template") or "")),
+                                                   f"block-{before.id}")
+
+        return await template_action(request, work, f"blocks:{wanted}", ("name", "text", "link_slot"),
+                                     f"block-{wanted}")
+
+    @app.post(template_view_mod.PAGE_URL + "/blocks/{block_id}/delete")
+    async def delete_shared_block(request: Request, block_id: str) -> Response:
+        wanted = _template_id(block_id)
+
+        def work(store: Store, form: Any) -> tuple[str, str, str]:
+            back = _template_id(str(form.get("template") or ""))
+            if wanted is None or not store.delete_template_block(wanted):
+                raise ValueError("That block does not exist.")
+            return "ok", "Shared block deleted.", templates_target(back, "blocks")
+
+        return await template_action(request, work, anchor="blocks")
 
     # --- affiliate links (G2) ---------------------------------------------------------------------
     def affiliate_path() -> Path:

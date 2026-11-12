@@ -24,6 +24,7 @@
       <span class="score-label">SEO score</span>
       {% if card.failed %}<span class="band-text {{ entry.band }} score-gain">+{{ card.missing }} points possible</span>
       <span class="muted">{{ card.failed|length }} check{{ '' if card.failed|length == 1 else 's' }} to fix</span>{% endif %}
+      {% if tsv.draft_points is not none %}<span class="muted" id="video-draft-template">With this draft: {{ tsv.draft_points }} of {{ tsv.max_points }} on this check</span>{% endif %}
     </div>
   </div>
 </section>
@@ -46,6 +47,8 @@
   {% if change and change.stale %}<p class="flash">YouTube's text changed since this draft was started. Review it on the Changes page.</p>{% endif %}
   {# Out-of-date translations are said on the Translations row, with the button that fixes them. #}
   {% if change %}{{ issue_list(change.errors, change.warnings|rejectattr('code', 'equalto', 'translations_out_of_date')|list) }}{% endif %}
+  {% include "_template_sections.html" %}
+  {% if tsv.view != 'sections' %}
   <form class="edit-form" method="post" action="/videos/{{ video.video_id|urlencode }}/draft">
     <input type="hidden" name="csrf" value="{{ csrf }}">
     <div class="field">
@@ -67,6 +70,7 @@
     </div>
     <div class="actions"><button type="submit" class="button primary">Save as draft</button></div>
   </form>
+  {% endif %}
 </section>
 
 {% include "_video_tools.html" %}

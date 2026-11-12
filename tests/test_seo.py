@@ -18,6 +18,7 @@ from yezatas.seo import (
     score_video,
     tags_char_count,
 )
+from yezatas.seo import TemplateJudgment
 from yezatas.store import Video
 
 CHAPTERS = "0:00 Intro\n1:30 Setting up the garden bed\n4:10 Planting the seeds\n8:45 Wrap up"
@@ -32,6 +33,10 @@ DESCRIPTION = (
     "the small mistakes that cost us time, so you can skip them.\n"
     "#gardening #raisedbed"
 )
+
+
+PERFECT_TEMPLATE = TemplateJudgment(template_name="Main", fixed_points=7, order_ok=True,
+                                    blocks_total=2, blocks_current=2)
 
 
 def make_video(**overrides) -> Video:
@@ -61,10 +66,12 @@ def check(video: Video, check_id: str, context: ChannelContext | None = None):
 
 
 def ctx_for(*videos: Video) -> ChannelContext:
-    """The channel context, with Muse Spark agreeing with each video's category and a comment from the channel."""
+    """The channel context, with Muse Spark agreeing with each video's category, a comment from the channel
+    and a description that follows its template."""
     return replace(channel_context(videos),
                    category_checks={v.video_id: CategoryJudgment("26", "26", False) for v in videos},
-                   pinned={v.video_id: "own" for v in videos})
+                   pinned={v.video_id: "own" for v in videos},
+                   templates={v.video_id: PERFECT_TEMPLATE for v in videos})
 
 
 # --- whole scorecard ---
@@ -77,16 +84,17 @@ def test_perfect_video_scores_100():
     assert all(c.applicable and c.passed for c in result.checks)
 
 
-def test_perfect_video_total_is_111_points():
+def test_perfect_video_total_is_124_points():
     result = card(make_video(), ctx_for(make_video()))
-    assert sum(c.max_points for c in result.checks) == 111  # 100 + the category check (6) + the pinned comment (5)
-    assert len(result.checks) == len(CHECKS) == 27
+    # 100 + the category check (6) + the pinned comment (5) + the unique opening (3) + the template (10)
+    assert sum(c.max_points for c in result.checks) == 124
+    assert len(result.checks) == len(CHECKS) == 29
 
 
-def test_max_points_of_all_checks_sum_to_111():
+def test_max_points_of_all_checks_sum_to_124():
     result = card(make_video(), ctx_for(make_video()))
     assert all(c.applicable for c in result.checks)
-    assert sum(c.max_points for c in result.checks) == 111  # 100 + the category check (6) + the pinned comment (5)
+    assert sum(c.max_points for c in result.checks) == 124
 
 
 def test_empty_video_scores_low_and_does_not_crash():
@@ -606,3 +614,250 @@ def test_localizations_made_from_older_text_do_not_count():
     assert "out-of-date languages again" in result.fix
     stale = seo.score_catalog([video], {video.video_id: frozenset({"fr"})})[video.video_id]
     assert stale.score < seo.score_catalog([video])[video.video_id].score
+
+
+# --- description template ---
+
+def template_ctx(video: Video, judgment: TemplateJudgment | None) -> ChannelContext:
+    templates = {} if judgment is None else {video.video_id: judgment}
+    return replace(channel_context([video]), templates=templates)
+
+
+def test_template_check_skips_with_no_judgment():
+    video = make_video()
+    for context in (None, channel_context([video])):
+        result = check(video, "description_template", context)
+        assert not result.applicable and result.points == 0 and result.max_points == 10
+        assert result.fix == ""
+    assert check(video, "description_template", channel_context([video])).detail == \
+        "Description templates are not set up yet."
+
+
+@pytest.mark.parametrize("reason", ["You excluded this video.", "Shorts are excluded from templates.",
+                                    "No description template yet."])
+def test_template_check_skips_with_the_reason_when_not_applicable(reason):
+    video = make_video()
+    judgment = TemplateJudgment(applicable=False, reason=reason, excluded=reason != "No description template yet.")
+    result = check(video, "description_template", template_ctx(video, judgment))
+    assert not result.applicable and result.detail == reason
+
+
+def test_template_check_full_points():
+    video = make_video()
+    result = check(video, "description_template", template_ctx(video, PERFECT_TEMPLATE))
+    assert result.applicable and result.passed and (result.points, result.max_points) == (10, 10)
+    assert result.category == "description"
+    assert result.title == "Follows the description template"
+    assert result.detail == 'Follows "Main": 2 of 2 shared blocks current.' and result.fix == ""
+
+
+def test_template_check_points_are_fixed_plus_order():
+    video = make_video()
+    judgment = TemplateJudgment(template_name="Main", fixed_points=5, order_ok=False, blocks_total=2,
+                                blocks_current=1, out_of_date=("Support and follow",))
+    assert check(video, "description_template", template_ctx(video, judgment)).points == 5
+    assert check(video, "description_template",
+                 template_ctx(video, replace(judgment, order_ok=True))).points == 8
+
+
+def test_template_check_detail_and_fix_name_the_blocks():
+    video = make_video()
+    judgment = TemplateJudgment(template_name="Main", fixed_points=1, order_ok=False, blocks_total=2,
+                                blocks_current=0, out_of_date=("Support and follow",), missing=("Paid links",),
+                                wrong_place=("Hashtags",))
+    result = check(video, "description_template", template_ctx(video, judgment))
+    assert result.detail == ('Follows "Main": 0 of 2 shared blocks current; Support and follow is an old '
+                             'version; Paid links is missing; Hashtags is out of order.')
+    assert result.fix == ("Update Support and follow to the current text, add Paid links, and move "
+                          "Hashtags to its place in the template.")
+
+
+def test_template_check_plural_sentences():
+    video = make_video()
+    judgment = TemplateJudgment(template_name="Gardening", fixed_points=0, order_ok=False, blocks_total=5,
+                                blocks_current=1, out_of_date=("Support", "Newsletter"),
+                                missing=("Paid links", "Seed shop", "Tools"),
+                                wrong_place=("Hashtags", "Chapters"))
+    result = check(video, "description_template", template_ctx(video, judgment))
+    assert result.detail == ('Follows "Gardening": 1 of 5 shared blocks current; Support and Newsletter are '
+                             'old versions; Paid links, Seed shop and Tools are missing; Hashtags and '
+                             'Chapters are out of order.')
+    assert result.fix == ("Update Support and Newsletter to the current text, add Paid links, Seed shop and "
+                          "Tools, and move Hashtags and Chapters to their places in the template.")
+
+
+def test_template_check_two_steps_join_with_and():
+    video = make_video()
+    judgment = TemplateJudgment(template_name="Main", fixed_points=3, order_ok=True, blocks_total=2,
+                                blocks_current=1, missing=("Paid links",), wrong_place=())
+    result = check(video, "description_template", template_ctx(video, judgment))
+    assert result.detail == 'Follows "Main": 1 of 2 shared blocks current; Paid links is missing.'
+    assert result.fix == "Add Paid links."
+    judgment = replace(judgment, fixed_points=7, blocks_current=2, missing=(), order_ok=False,
+                       out_of_date=(), wrong_place=("Paid links",))
+    assert check(video, "description_template", template_ctx(video, judgment)).fix == \
+        "Move Paid links to its place in the template."
+
+
+def test_template_check_too_little_to_check_the_order():
+    video = make_video()
+    no_blocks = TemplateJudgment(template_name="Simple", fixed_points=7, order_ok=False)
+    result = check(video, "description_template", template_ctx(video, no_blocks))
+    assert result.points == 7
+    assert result.detail == ('Follows "Simple": it has no shared blocks; too little of the template is there '
+                             'to check its order.')
+    assert result.fix == "Add the template's shared blocks so its order can be checked."
+    all_missing = TemplateJudgment(template_name="Main", fixed_points=0, order_ok=False, blocks_total=1,
+                                   missing=("Paid links",))
+    result = check(video, "description_template", template_ctx(video, all_missing))
+    assert result.detail.endswith("Paid links is missing; too little of the template is there to check its order.")
+    assert result.fix == "Add Paid links."
+
+
+def test_template_check_says_which_blocks_are_not_set_up_and_never_asks_to_add_them():
+    video = make_video()
+    mixed = TemplateJudgment(template_name="Main", fixed_points=7, order_ok=True, blocks_total=1,
+                             blocks_current=1, not_set_up=("Paid links",))
+    result = check(video, "description_template", template_ctx(video, mixed))
+    assert result.points == 10 and result.fix == ""
+    assert result.detail == 'Follows "Main": 1 of 1 shared blocks current; Paid links is not set up yet.'
+    missing = replace(mixed, fixed_points=0, blocks_current=0, missing=("Support and follow",))
+    result = check(video, "description_template", template_ctx(video, missing))
+    assert result.detail == ('Follows "Main": 0 of 1 shared blocks current; Support and follow is missing; '
+                             'Paid links is not set up yet.')
+    assert result.fix == "Add Support and follow."
+
+
+def test_template_check_with_every_block_not_set_up():
+    video = make_video()
+    judgment = TemplateJudgment(template_name="Main", fixed_points=7, order_ok=True,
+                                not_set_up=("Paid links", "Support and follow"))
+    result = check(video, "description_template", template_ctx(video, judgment))
+    assert result.points == 10 and result.fix == ""
+    assert result.detail == 'Follows "Main": Paid links and Support and follow are not set up yet.'
+    result = check(video, "description_template", template_ctx(video, replace(judgment, order_ok=False)))
+    assert result.detail == ('Follows "Main": Paid links and Support and follow are not set up yet; too little '
+                             'of the template is there to check its order.')
+    assert result.fix == "Add more of the template's sections so its order can be checked."
+    assert "Paid links" not in result.fix
+
+
+def test_score_catalog_without_template_inputs_ignores_the_template_check():
+    video = make_video()
+    card_ = score_catalog([video])["v1"]
+    template_check = next(c for c in card_.checks if c.check_id == "description_template")
+    assert not template_check.applicable
+    applicable = [c for c in card_.checks if c.applicable]
+    assert card_.score == round(100 * sum(c.points for c in applicable) / sum(c.max_points for c in applicable))
+    assert "description_template" not in {c.check_id for c in applicable}
+    with_templates = score_catalog([video], templates={"v1": replace(PERFECT_TEMPLATE, fixed_points=0,
+                                                                     order_ok=False)})["v1"]
+    assert with_templates.score < card_.score
+
+
+# --- unique opening ---
+
+OTHER_OPENING = ("Today we turn kitchen scraps into rich compost in a small bin that fits on any balcony. "
+                 "No smell, no mess.")
+
+
+def test_opening_unique_passes_for_a_unique_opening():
+    a = make_video(video_id="a")
+    b = make_video(video_id="b", description=OTHER_OPENING)
+    result = check(a, "description_opening_unique", channel_context([a, b]))
+    assert result.applicable and result.passed and result.max_points == 3 and result.category == "description"
+    assert result.title == "Description opening is not used on another video"
+    assert result.detail == "No other video opens with the same text."
+
+
+def test_opening_unique_fails_with_the_count():
+    a, b, c = (make_video(video_id=v) for v in "abc")
+    result = check(a, "description_opening_unique", channel_context([a, b, c]))
+    assert result.points == 0 and result.detail == "3 videos on the channel open with the same text."
+    assert result.fix.startswith("Write an opening that says what this video covers")
+
+
+def test_opening_unique_ignores_case_and_spacing():
+    # an opening shorter than the 150-character window: extra spaces do not push words out of it
+    a = make_video(video_id="a", description=OTHER_OPENING)
+    b = make_video(video_id="b", description="  " + OTHER_OPENING.upper().replace(" ", "\n ", 3))
+    assert not check(a, "description_opening_unique", channel_context([a, b])).passed
+
+
+def test_opening_unique_looks_only_at_the_opening_window():
+    a = make_video(video_id="a")
+    b = make_video(video_id="b", description=DESCRIPTION[:seo.HOOK_WINDOW] + " and a different ending.")
+    assert not check(a, "description_opening_unique", channel_context([a, b])).passed
+
+
+def test_opening_unique_not_applicable_for_shorts_and_short_openings():
+    short = make_video(video_id="s", duration="PT45S")
+    assert not check(short, "description_opening_unique", channel_context([short])).applicable
+    brief = make_video(video_id="b", description="A raised bed. https://shop.test/a #garden")
+    result = check(brief, "description_opening_unique", channel_context([brief]))
+    assert not result.applicable and result.detail == "The opening is too short to compare."
+    assert not check(make_video(), "description_opening_unique", None).applicable
+
+
+def test_opening_unique_does_not_count_shorts():
+    long_video = make_video(video_id="a")
+    short = make_video(video_id="s", duration="PT45S")
+    context = channel_context([long_video, short])
+    assert context.opening_counts == {seo.opening_key(DESCRIPTION): 1}
+    assert check(long_video, "description_opening_unique", context).passed
+
+
+def test_opening_unique_sits_right_after_the_hook_check():
+    ids = [c.check_id for c in card(make_video()).checks]
+    assert ids[ids.index("description_hook") + 1] == "description_opening_unique"
+
+
+# --- description length: own text only ---
+
+def test_description_length_counts_own_text_only():
+    video = make_video(description="a" * 600)
+    context = replace(channel_context([video]), own_chars={"v1": 300})
+    result = check(video, "description_length", context)
+    assert result.points == 2
+    assert result.detail == "Your own text is 300 characters (shared blocks not counted)."
+    assert result.fix == ("Write at least 500 characters of your own about what the video covers; "
+                          "it is 300 now.")
+    good = replace(context, own_chars={"v1": 520})
+    assert check(video, "description_length", good).points == 5
+    assert check(video, "description_length", good).detail == \
+        "Your own text is 520 characters (shared blocks not counted)."
+
+
+def test_description_length_never_counts_more_than_the_whole_text():
+    video = make_video(description="a" * 300)
+    context = replace(channel_context([video]), own_chars={"v1": 900})
+    result = check(video, "description_length", context)
+    assert result.points == 2 and result.detail == "The description is 300 characters."
+
+
+def test_description_length_with_no_library_is_todays_result():
+    video = make_video(description="  " + "a" * 400 + "  ")
+    today = check(video, "description_length", None)
+    assert today.detail == "The description is 400 characters." and today.points == 2
+    assert check(video, "description_length", channel_context([video])) == today
+    assert check(video, "description_length", replace(channel_context([video]), own_chars={"other": 1})) == today
+    assert next(c for c in score_catalog([video])["v1"].checks if c.check_id == "description_length") == today
+    assert next(c for c in score_catalog([video], own_chars={})["v1"].checks
+                if c.check_id == "description_length") == today
+
+
+def test_the_5000_limit_still_counts_the_whole_description():
+    video = make_video(description="a" * 5001)
+    context = replace(channel_context([video]), own_chars={"v1": 100})
+    assert not check(video, "description_limit", context).passed
+
+
+def test_opening_unique_ignores_spacing_in_a_long_opening():
+    # the same 200-character opening, once with doubled spaces and line breaks: still the same opening
+    words = "We build a raised garden bed in one day and then plant the first seeds of the new season " * 3
+    spaced = words.replace(" ", "  ").replace("garden", "garden\n")
+    assert len(words) > seo.HOOK_WINDOW
+    assert seo.opening_key(spaced) == seo.opening_key(words)
+    a, b = make_video(video_id="a", description=words), make_video(video_id="b", description=spaced)
+    result = check(a, "description_opening_unique", channel_context([a, b]))
+    assert result.applicable and not result.passed

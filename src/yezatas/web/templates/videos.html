@@ -16,6 +16,12 @@
     <a class="chip{% if listing.outlier_chip.active %} active{% endif %}" id="chip-outliers" href="{{ listing.outlier_chip.href }}"{% if listing.outlier_chip.active %} aria-current="true"{% endif %} title="Videos with at least this many times the views of the videos published around them">{{ listing.outlier_chip.label }}</a>
     <a class="chip{% if listing.fix_chip.active %} active{% endif %}" id="chip-fix" href="{{ listing.fix_chip.href }}"{% if listing.fix_chip.active %} aria-current="true"{% endif %} title="Videos where a fix gains the most first: views times the points they miss">{{ listing.fix_chip.label }}</a>
   </div>
+  {% if listing.templates_on %}
+  <div class="chip-row" role="group" aria-label="Template" id="template-chips">
+    <span class="chip-label">Template</span>
+    {% for chip in listing.template_chips %}<a class="chip{% if chip.active %} active{% endif %}" href="{{ chip.href }}"{% if chip.active %} aria-current="true"{% endif %}>{{ chip.label }}</a>{% endfor %}
+  </div>
+  {% endif %}
   {% if listing.check %}
   <div class="chip-row">
     <span class="chip-label">Failing check</span>
@@ -34,10 +40,28 @@
 <p class="result-count" id="result-count">{{ listing.total }} video{{ '' if listing.total == 1 else 's' }}{% if listing.pages > 1 %} &middot; showing {{ listing.first }}-{{ listing.last }}{% endif %}</p>
 
 {% if listing.entries %}
-<table class="vtable">
+{% if listing.templates_on %}
+<form method="post" action="/videos/template" id="vt-bulk">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  {% for name, value in listing.form_fields %}<input type="hidden" name="{{ name }}" value="{{ value }}">
+  {% endfor %}
+  <div class="vt-bulkbar" id="vt-bulkbar">
+    <label for="vt-choice">Template for the ticked videos</label>
+    <select id="vt-choice" name="choice" required>
+      <option value="" selected>Choose…</option>
+      <option value="auto">Automatic</option>
+      {% for tid, name in listing.template_options %}<option value="{{ tid }}">{{ name }}</option>
+      {% endfor %}<option value="exclude">Exclude from templates</option>
+    </select>
+    <button class="button" type="submit">Set template</button>
+  </div>
+{% endif %}
+<table class="vtable{% if listing.templates_on %} with-template{% endif %}">
   <thead>
     <tr>
+      {% if listing.templates_on %}<th class="col-pick" scope="col"><input type="checkbox" id="vt-pick-all" data-pick-all="video" hidden aria-label="Tick every video on this page"></th>{% endif %}
       {{ sort_th(listing.columns['title'], 'col-video') }}
+      {% if listing.templates_on %}{{ sort_th(listing.columns['template'], 'col-template') }}{% endif %}
       {{ sort_th(listing.columns['visibility'], 'col-vis') }}
       {{ sort_th(listing.columns['date'], 'col-date') }}
       {{ sort_th(listing.columns['views'], 'col-num') }}
@@ -48,6 +72,7 @@
   <tbody>
     {% for e in listing.entries %}
     <tr>
+      {% if listing.templates_on %}<td class="col-pick"><input type="checkbox" name="video" value="{{ e.video.video_id }}" id="pick-{{ loop.index }}" aria-label="Tick {{ e.video.title }}"></td>{% endif %}
       <td class="col-video">
         <div class="vcell">
           <a class="vthumb" href="/videos/{{ e.video.video_id|urlencode }}" tabindex="-1" aria-hidden="true">{{ thumb(e.thumb, 'sm') }}</a>
@@ -58,6 +83,9 @@
           </div>
         </div>
       </td>
+      {% if listing.templates_on %}
+      <td class="col-template"><span class="vt-tpl{% if e.template_kind != 'template' %} muted{% endif %}">{{ e.template_label }}</span>{% if e.template_reason or e.template_points %}<span class="vt-tpl-why">{{ e.template_reason }}{% if e.template_reason and e.template_points %} &middot; {% endif %}{{ e.template_points }}</span>{% endif %}</td>
+      {% endif %}
       <td class="col-vis">{{ e.visibility }}</td>
       <td class="col-date">{{ e.date_text }}</td>
       <td class="col-num">{{ e.views_text }}</td>
@@ -67,6 +95,7 @@
     {% endfor %}
   </tbody>
 </table>
+{% if listing.templates_on %}</form>{% endif %}
 
 {% if listing.pages > 1 %}
 <nav class="pager" aria-label="Pages">

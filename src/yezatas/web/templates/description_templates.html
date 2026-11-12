@@ -1,0 +1,383 @@
+{% extends "shell.html" %}
+{# The Description templates page. `tp` is web/template_view.TemplatesPage. Every action is a plain form; nothing here
+   reaches YouTube and nothing calls a model. #}
+{% block title %}Description templates - Yezatas{% endblock %}
+{% block content %}
+{% set base = "/description-templates" %}
+{% set typed = tp.typed %}
+{% set t = tp.chosen %}
+<h1 class="page-title">Description templates</h1>
+<p class="intro" id="tp-about">Sets the structure of every description. Each video keeps its own opening, and nothing goes to YouTube until you approve it.</p>
+{% if tp.notice %}<p class="flash" role="status" id="tp-notice">{{ tp.notice }}</p>{% endif %}
+
+{% if tp.empty %}
+<section class="empty-state" id="tp-empty" aria-labelledby="h-tp-empty">
+  <h2 id="h-tp-empty">No description templates yet</h2>
+  <p class="muted">A template is the order of the parts of a description: the video's own opening, chapters and hashtags, and shared blocks such as your support links that are written once and repeat on every video. Yezatas checks each video against its template and shows what is missing or out of date.</p>
+  <form method="post" action="{{ base }}/start">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <button type="submit" class="button primary">Start with the suggested template</button>
+  </form>
+  <p><a class="button secondary" id="tp-build-empty" href="{{ base }}/build">Build from my channel</a></p>
+  <p class="hint">It adds one template, "Main", and the shared blocks {{ tp.starter_blocks|join(" and ") }} with placeholder text for you to replace.</p>
+</section>
+{% else %}
+
+<div class="tp-cover" id="tp-coverage">
+  <div class="tp-stat" id="tp-cover-following"><span class="tp-stat-k">Follow their template</span><span class="tp-stat-v">{{ tp.cover.following }}</span></div>
+  {% if tp.cover.needs_changes %}
+  <a class="tp-stat warn" id="tp-cover-needs" href="{{ tp.cover.needs_url }}"><span class="tp-stat-k">Need changes</span><span class="tp-stat-v">{{ tp.cover.needs_changes }}</span></a>
+  {% else %}
+  <div class="tp-stat" id="tp-cover-needs"><span class="tp-stat-k">Need changes</span><span class="tp-stat-v">0</span></div>
+  {% endif %}
+  {% if tp.cover.excluded %}
+  <a class="tp-stat" id="tp-cover-excluded" href="{{ tp.cover.excluded_url }}"><span class="tp-stat-k">Excluded</span><span class="tp-stat-v">{{ tp.cover.excluded }}</span></a>
+  {% else %}
+  <div class="tp-stat" id="tp-cover-excluded"><span class="tp-stat-k">Excluded</span><span class="tp-stat-v">0</span></div>
+  {% endif %}
+  {% if tp.cover.no_template %}
+  <a class="tp-stat" id="tp-cover-none" href="{{ tp.cover.none_url }}"><span class="tp-stat-k">No template</span><span class="tp-stat-v">{{ tp.cover.no_template }}</span></a>
+  {% else %}
+  <div class="tp-stat" id="tp-cover-none"><span class="tp-stat-k">No template</span><span class="tp-stat-v">0</span></div>
+  {% endif %}
+</div>
+
+<div class="tp-chips" id="tp-chips">
+  <div class="chip-row">
+    {% for c in tp.chips %}
+    <a class="chip{% if c.active %} active{% endif %}" id="chip-template-{{ c.id }}" href="{{ c.url }}"{% if c.active %} aria-current="true"{% endif %}>{{ c.name }}<span class="tp-chip-n">{{ c.count }}</span>{% if c.is_default %}<span class="tp-chip-default">Default</span>{% endif %}</a>
+    {% endfor %}
+  </div>
+  <a class="tp-blocks-link" href="#blocks">Shared blocks <span class="muted">{{ tp.blocks|length }}</span></a>
+</div>
+
+{% set nt = typed.get("new", {}) %}
+<details class="tp-new" id="new-template"{% if nt %} open{% endif %}>
+  <summary class="button secondary">New template</summary>
+  <form class="edit-form tp-inline-form" method="post" action="{{ base }}/new">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    {% if tp.chosen %}<input type="hidden" name="template" value="{{ tp.chosen.id }}">{% endif %}
+    <div class="field">
+      <label for="new-name">Name</label>
+      <input type="text" id="new-name" name="name" value="{{ nt.get('name', '') }}" autocomplete="off" maxlength="100">
+    </div>
+    <fieldset class="tp-radios">
+      <legend>Start from</legend>
+      <label class="check-label"><input type="radio" name="start" value="empty"{% if nt.get('start') != 'copy' %} checked{% endif %}> An empty template</label>
+      {% if tp.chosen %}<label class="check-label"><input type="radio" name="start" value="copy"{% if nt.get('start') == 'copy' %} checked{% endif %}> A copy of the sections of "{{ tp.chosen.name }}"</label>{% endif %}
+    </fieldset>
+    <div class="actions"><button type="submit" class="button primary">Add template</button></div>
+  </form>
+</details>
+
+<div class="tp-two">
+<section class="card tp-template" id="template" aria-labelledby="h-template">
+  <div class="tp-head">
+    <h2 id="h-template">{{ t.name }}</h2>
+    <span class="muted">{{ t.video_count }} {{ "video" if t.video_count == 1 else "videos" }}</span>
+    {% if t.is_default %}<span class="pill working" id="tp-default-pill">Default</span>{% endif %}
+  </div>
+
+  <div class="tp-tools">
+    {% set rn = typed.get("rename", {}) %}
+    <details class="tp-fold" id="tp-rename"{% if rn %} open{% endif %}>
+      <summary class="link-button">Rename</summary>
+      <form class="edit-form tp-inline-form" method="post" action="{{ base }}/{{ t.id }}/rename">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <input type="hidden" name="template" value="{{ t.id }}">
+        <label class="visually-hidden" for="rename-name">Template name</label>
+        <input type="text" id="rename-name" name="name" value="{{ rn.get('name', t.name) }}" autocomplete="off" maxlength="100">
+        <button type="submit" class="button secondary">Save name</button>
+      </form>
+    </details>
+    {% if not t.is_default %}
+    <form class="inline" method="post" action="{{ base }}/{{ t.id }}/default">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <input type="hidden" name="template" value="{{ t.id }}">
+      <button type="submit" class="link-button">Make default</button>
+    </form>
+    {% endif %}
+    <details class="tp-fold" id="tp-delete">
+      <summary class="link-button">Delete</summary>
+      <form class="tp-confirm" method="post" action="{{ base }}/{{ t.id }}/delete">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <input type="hidden" name="template" value="{{ t.id }}">
+        <p>Delete "{{ t.name }}"?
+          {% if t.hand_picked %}{{ t.hand_picked }} {{ "video has" if t.hand_picked == 1 else "videos have" }} it chosen by hand; {{ "that choice goes" if t.hand_picked == 1 else "those choices go" }} with it.
+          {% else %}No video has it chosen by hand.{% endif %}
+          Its shared blocks stay in the library.</p>
+        <button type="submit" class="button secondary tp-danger">Yes, delete the template</button>
+      </form>
+    </details>
+  </div>
+
+  <div class="tp-priority" id="priority">
+    <span class="muted">Priority</span>
+    <form class="inline" method="post" action="{{ base }}/{{ t.id }}/move">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <input type="hidden" name="template" value="{{ t.id }}">
+      <input type="hidden" name="direction" value="up">
+      <button type="submit" class="button secondary tp-small"{% if not t.can_up %} disabled{% endif %}>Move up</button>
+    </form>
+    <form class="inline" method="post" action="{{ base }}/{{ t.id }}/move">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <input type="hidden" name="template" value="{{ t.id }}">
+      <input type="hidden" name="direction" value="down">
+      <button type="submit" class="button secondary tp-small"{% if not t.can_down %} disabled{% endif %}>Move down</button>
+    </form>
+  </div>
+
+  {# Pull playlists: on every template; under the default's sentence, else after the rule forms #}
+  {% set pull_form %}
+    <form class="tp-inline-form tp-pull-playlists" id="playlists-pull" method="post" action="{{ base }}/playlists/pull">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <input type="hidden" name="template" value="{{ t.id }}">
+      <button type="submit" class="button secondary">Pull playlists</button>
+      <span class="hint" id="playlists-count">{% if tp.playlists %}{{ tp.playlists|length }} {{ "playlist" if tp.playlists|length == 1 else "playlists" }} stored.{% else %}No playlists stored yet.{% endif %} Pulling only reads from YouTube.</span>
+    </form>
+  {% endset %}
+  <div class="tp-rules" id="rules">
+    <h3 class="tp-h3">Videos</h3>
+    {% if t.is_default %}
+    <p id="tp-default-rule">Takes every video no other template claims.{% if t.rules %} These rules are not used while this is the default template.{% endif %}</p>
+    {{ pull_form }}
+    {% endif %}
+    {% if t.rules %}
+    <ul class="tp-rule-list">
+      {% for r in t.rules %}
+      <li class="tp-rule">
+        <span>{{ r.text }}</span>
+        <form class="inline" method="post" action="{{ base }}/{{ t.id }}/rules/remove">
+          <input type="hidden" name="csrf" value="{{ csrf }}">
+          <input type="hidden" name="template" value="{{ t.id }}">
+          <input type="hidden" name="kind" value="{{ r.kind }}">
+          <input type="hidden" name="value" value="{{ r.value }}">
+          <button type="submit" class="link-button" aria-label="Remove the rule {{ r.text }}">Remove</button>
+        </form>
+      </li>
+      {% endfor %}
+    </ul>
+    {% elif not t.is_default %}
+    <p class="muted" id="tp-no-rules">No rules yet, so this template takes only videos you choose for it by hand.</p>
+    {% endif %}
+    {% if not t.is_default %}<p class="hint">The first template that matches wins. A choice on the video page overrides it.</p>{% endif %}
+
+    {% if not t.is_default %}
+    {% set ru = typed.get("rules", {}) %}
+    <details class="tp-fold" id="rule-add"{% if ru %} open{% endif %}>
+      <summary class="link-button">Add rule</summary>
+      <form class="edit-form tp-inline-form" id="rule-playlist-form" method="post" action="{{ base }}/{{ t.id }}/rules/add">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <input type="hidden" name="template" value="{{ t.id }}">
+        <input type="hidden" name="kind" value="playlist">
+        <label for="rule-playlist">In the playlist</label>
+        {% if tp.playlists %}
+        <select id="rule-playlist" name="value">
+          {% for pid, ptitle, pcount in tp.playlists %}<option value="{{ pid }}"{% if ru.get('kind') == 'playlist' and ru.get('value') == pid %} selected{% endif %}>{{ ptitle }} ({{ pcount }} {{ "video" if pcount == 1 else "videos" }})</option>{% endfor %}
+        </select>
+        <button type="submit" class="button secondary">Add</button>
+        {% else %}
+        <select id="rule-playlist" name="value" disabled><option>Playlists are not pulled yet</option></select>
+        <button type="submit" class="button secondary" disabled>Add</button>
+        {% endif %}
+      </form>
+      <form class="edit-form tp-inline-form" id="rule-word-form" method="post" action="{{ base }}/{{ t.id }}/rules/add">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <input type="hidden" name="template" value="{{ t.id }}">
+        <label class="visually-hidden" for="rule-kind">Kind of rule</label>
+        <select id="rule-kind" name="kind">
+          <option value="title_word"{% if ru.get('kind') == 'title_word' %} selected{% endif %}>A word in the title</option>
+          <option value="tag"{% if ru.get('kind') == 'tag' %} selected{% endif %}>A tag</option>
+        </select>
+        <label class="visually-hidden" for="rule-value">Word or tag</label>
+        <input type="text" id="rule-value" name="value" value="{{ ru.get('value', '') if ru.get('kind') != 'playlist' else '' }}" autocomplete="off" maxlength="100">
+        <button type="submit" class="button secondary">Add</button>
+      </form>
+    </details>
+    {% endif %}
+    {% if not t.is_default %}{{ pull_form }}{% endif %}
+  </div>
+
+  <div class="tp-sections" id="sections">
+    <div class="tp-sec-head"><h3 class="tp-h3">Sections, in order</h3><span class="muted">On {{ t.video_count }} {{ "video" if t.video_count == 1 else "videos" }}</span></div>
+    {% if t.sections %}
+    <ol class="tp-sec-list">
+      {% for s in t.sections %}
+      <li class="tp-sec{% if s.is_block %} block{% endif %}" id="section-{{ s.key|replace(':', '-') }}">
+        <div class="tp-sec-main">
+          <div class="tp-sec-name">{{ s.name }}</div>
+          {% if s.hint %}<div class="hint">{{ s.hint }}</div>{% endif %}
+          {% if s.is_block %}
+          <pre class="tp-block-text">{{ s.block_lines|join("\n") }}</pre>
+          {% if s.placeholder %}<p class="tp-placeholder">Placeholder text: replace it with your own under Shared blocks.</p>{% endif %}
+          <div class="hint">{{ s.shared_with }} <a href="#block-{{ s.block_id }}">Edit block</a></div>
+          {% endif %}
+        </div>
+        <span class="pill{% if s.is_block %} working{% endif %} tp-kind">{{ "Shared block" if s.is_block else "Per video" }}</span>
+        <span class="tp-sec-count{% if s.warn %} warn{% endif %}">{{ s.count_text }}</span>
+        <div class="tp-sec-actions">
+          {% for direction, label, allowed in (("up", "Move up", s.can_up), ("down", "Move down", s.can_down)) %}
+          <form class="inline" method="post" action="{{ base }}/{{ t.id }}/sections/move">
+            <input type="hidden" name="csrf" value="{{ csrf }}">
+            <input type="hidden" name="template" value="{{ t.id }}">
+            <input type="hidden" name="section" value="{{ s.key }}">
+            <input type="hidden" name="direction" value="{{ direction }}">
+            <button type="submit" class="link-button" aria-label="{{ label }} {{ s.name }}"{% if not allowed %} disabled{% endif %}>{{ label }}</button>
+          </form>
+          {% endfor %}
+          <form class="inline" method="post" action="{{ base }}/{{ t.id }}/sections/remove">
+            <input type="hidden" name="csrf" value="{{ csrf }}">
+            <input type="hidden" name="template" value="{{ t.id }}">
+            <input type="hidden" name="section" value="{{ s.key }}">
+            <button type="submit" class="link-button" aria-label="Remove {{ s.name }}">Remove</button>
+          </form>
+        </div>
+      </li>
+      {% endfor %}
+    </ol>
+    {% else %}
+    <p class="muted" id="tp-no-sections">No sections yet. Add the first one below.</p>
+    {% endif %}
+    {% if t.addable_kinds or t.addable_blocks %}
+    <form class="edit-form tp-inline-form" id="section-add" method="post" action="{{ base }}/{{ t.id }}/sections/add">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <input type="hidden" name="template" value="{{ t.id }}">
+      <label for="section-pick">Add a section or a shared block</label>
+      <select id="section-pick" name="section">
+        {% if t.addable_kinds %}<optgroup label="Per video">{% for kind, label in t.addable_kinds %}<option value="{{ kind }}">{{ label }}</option>{% endfor %}</optgroup>{% endif %}
+        {% if t.addable_blocks %}<optgroup label="Shared blocks">{% for bid, bname in t.addable_blocks %}<option value="block:{{ bid }}">{{ bname }}</option>{% endfor %}</optgroup>{% endif %}
+      </select>
+      <button type="submit" class="button secondary">Add</button>
+    </form>
+    {% else %}
+    <p class="hint" id="section-add">Every section and shared block is in this template. Add a shared block below to use more.</p>
+    {% endif %}
+  </div>
+
+  <p class="tp-worth"><strong>Worth 10 points</strong> in the SEO score: 7 for shared blocks present and current, 3 for the order.</p>
+</section>
+
+<aside class="card tp-preview" id="preview" aria-labelledby="h-preview">
+  <div class="tp-head">
+    <h2 id="h-preview">Preview</h2>
+    {% if tp.preview %}<span class="{{ 'tp-over' if tp.preview.over else 'muted' }}" id="tp-bytes">{{ "{:,}".format(tp.preview.bytes_used) }} of {{ "{:,}".format(tp.preview.bytes_limit) }} bytes</span>{% endif %}
+  </div>
+  {% if tp.following_videos or tp.other_videos %}
+  <form class="tp-pick" method="get" action="{{ base }}#preview">
+    <input type="hidden" name="template" value="{{ t.id }}">
+    <label class="visually-hidden" for="preview-video">Video to preview</label>
+    <select id="preview-video" name="video">
+      {% if tp.following_videos %}<optgroup label="Follow this template">{% for v in tp.following_videos %}<option value="{{ v.video_id }}"{% if tp.preview and tp.preview.video_id == v.video_id %} selected{% endif %}>{{ v.title }}</option>{% endfor %}</optgroup>{% endif %}
+      {% if tp.other_videos %}<optgroup label="Other videos">{% for v in tp.other_videos %}<option value="{{ v.video_id }}"{% if tp.preview and tp.preview.video_id == v.video_id %} selected{% endif %}>{{ v.title }}</option>{% endfor %}</optgroup>{% endif %}
+    </select>
+    <button type="submit" class="button secondary">Show</button>
+  </form>
+  {% endif %}
+  {% if tp.preview %}
+  {% set p = tp.preview %}
+  {% if p.note %}<p class="hint" id="tp-preview-note">{{ p.note }}</p>{% endif %}
+  <div class="tp-points{% if p.points >= p.max_points %} done{% endif %}" id="tp-points">
+    <span class="tp-points-t">{{ "Follows this template" if p.points >= p.max_points else "Follows the description template" }}</span>
+    <span class="tp-points-n">{{ p.points }} of {{ p.max_points }} points</span>
+  </div>
+  <p class="hint" id="tp-points-detail">{{ p.detail }}</p>
+  {% if p.points < p.max_points and p.fix %}<p class="fix" id="tp-points-fix">{{ p.fix }}</p>{% endif %}
+  <ul class="tp-states" id="tp-states">
+    {% for s in p.sections %}
+    <li><span>{{ s.name }} <span class="muted">{{ s.kind_label }}</span></span><span class="pill {{ s.tone }}" data-state="{{ s.state }}">{{ s.label }}</span></li>
+    {% endfor %}
+  </ul>
+  <div class="tp-text" id="tp-text">
+    {%- for line in p.lines -%}
+    {%- if line.css == "more" -%}<div class="tp-more">{{ line.text }}</div>
+    {%- else -%}<div class="tp-line{% if line.css %} {{ line.css }}{% endif %}">{{ line.text or " " }}</div>{%- endif -%}
+    {%- endfor -%}
+  </div>
+  {% if p.fits_before_more %}<p class="hint">The whole description shows before "more".</p>{% endif %}
+  <div class="tp-tray" id="tp-tray">
+    <h3 class="tp-h3">Not in the template</h3>
+    {% if p.tray %}
+    <ul>
+      {% for item in p.tray %}<li><pre>{{ item.text }}</pre><span class="hint">{{ item.reason }}</span></li>{% endfor %}
+    </ul>
+    <p class="hint">This text costs no points. It is shown so nothing is lost when a template is applied later.</p>
+    {% else %}
+    <p class="muted">Every line belongs to a section.</p>
+    {% endif %}
+  </div>
+  {% else %}
+  <p class="muted" id="tp-no-preview">{% if tp.following_videos or tp.other_videos %}No video follows this template yet. Choose a video to see it against the template.{% else %}No videos are stored yet.{% endif %}</p>
+  {% endif %}
+</aside>
+</div>
+{% endif %}
+
+<section class="card tp-blocks" id="blocks" aria-labelledby="h-blocks">
+  <h2 id="h-blocks">Shared blocks</h2>
+  <p class="muted">Written once and repeated on every video whose template uses them. When you change a block's text, the old text is remembered, so videos that still carry it show as out of date instead of missing.</p>
+  <p><a class="button secondary" id="tp-build-blocks" href="{{ base }}/build">Build from my channel</a></p>
+  {% for b in tp.blocks %}
+  {% set bt = typed.get("blocks:" ~ b.id, {}) %}
+  <div class="tp-block" id="block-{{ b.id }}">
+    <div class="tp-head">
+      <h3 class="tp-h3">{{ b.name }}</h3>
+      {% if b.link_slot %}<span class="pill working">Links below are each video's own</span>{% endif %}
+      {% if b.placeholder %}<span class="pill warn">Placeholder text</span>{% endif %}
+    </div>
+    <p class="hint">{% if b.used_by %}Used by {{ b.used_by|join(", ") }}.{% else %}Not used by any template.{% endif %}
+      {% if b.old_count %}<span id="block-{{ b.id }}-old">{{ b.old_count }} old {{ "version" if b.old_count == 1 else "versions" }}</span> remembered.{% endif %}</p>
+    <form class="edit-form" method="post" action="{{ base }}/blocks/{{ b.id }}/edit">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      {% if t %}<input type="hidden" name="template" value="{{ t.id }}">{% endif %}
+      <div class="field">
+        <label for="block-name-{{ b.id }}">Name</label>
+        <input type="text" id="block-name-{{ b.id }}" name="name" value="{{ bt.get('name', b.name) }}" autocomplete="off" maxlength="100">
+      </div>
+      <div class="field">
+        <label for="block-text-{{ b.id }}">Text</label>
+        <textarea id="block-text-{{ b.id }}" name="text" rows="4">{{ bt.get('text', b.text) }}</textarea>
+      </div>
+      <label class="check-label"><input type="checkbox" name="link_slot" value="1"{% if (bt and bt.get('link_slot') == '1') or (not bt and b.link_slot) %} checked{% endif %}> The links right below this are each video's own</label>
+      <div class="actions"><button type="submit" class="button secondary">Save block</button></div>
+    </form>
+    <form method="post" action="{{ base }}/blocks/{{ b.id }}/delete">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      {% if t %}<input type="hidden" name="template" value="{{ t.id }}">{% endif %}
+      <button type="submit" class="link-button">Delete block</button>
+    </form>
+  </div>
+  {% else %}
+  <p class="muted" id="tp-no-blocks">No shared blocks yet.</p>
+  {% endfor %}
+
+  {% set ba = typed.get("blocks:add", {}) %}
+  <div class="tp-block" id="block-add">
+    <h3 class="tp-h3">Add a shared block</h3>
+    <form class="edit-form" method="post" action="{{ base }}/blocks/add">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      {% if t %}<input type="hidden" name="template" value="{{ t.id }}">{% endif %}
+      <div class="field">
+        <label for="block-add-name">Name</label>
+        <input type="text" id="block-add-name" name="name" value="{{ ba.get('name', '') }}" autocomplete="off" maxlength="100">
+      </div>
+      <div class="field">
+        <label for="block-add-text">Text</label>
+        <textarea id="block-add-text" name="text" rows="4">{{ ba.get('text', '') }}</textarea>
+      </div>
+      <label class="check-label"><input type="checkbox" name="link_slot" value="1"{% if ba.get('link_slot') == '1' %} checked{% endif %}> The links right below this are each video's own</label>
+      <div class="actions"><button type="submit" class="button primary">Add block</button></div>
+    </form>
+  </div>
+</section>
+
+<section class="card" id="settings" aria-labelledby="h-settings">
+  <h2 id="h-settings">Shorts</h2>
+  <form method="post" action="{{ base }}/settings">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    {% if t %}<input type="hidden" name="template" value="{{ t.id }}">{% endif %}
+    <label class="check-label"><input type="checkbox" id="include-shorts" name="include_shorts" value="1"{% if tp.include_shorts %} checked{% endif %}> Shorts follow templates too</label>
+    <p class="hint">Off by default. A Short you give a template by hand follows it either way.</p>
+    <div class="actions"><button type="submit" class="button secondary">Save</button></div>
+  </form>
+</section>
+{% endblock %}

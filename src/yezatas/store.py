@@ -7,7 +7,7 @@ import sqlite3
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Sequence
+from typing import TYPE_CHECKING, Any, Mapping, Sequence
 
 if TYPE_CHECKING:  # validate imports seo, which imports this module
     from .validate import Draft
@@ -433,10 +433,54 @@ _SCHEMA_V16: tuple[str, ...] = (
 # v17: a complete pull marks videos it no longer returns (deleted, or another channel's).
 _SCHEMA_V17: tuple[str, ...] = ("ALTER TABLE videos ADD COLUMN gone_at TEXT",)
 
+# v18: description templates: shared text blocks, the templates, per-video choices, settings, playlists.
+_SCHEMA_V18: tuple[str, ...] = (
+    """CREATE TABLE template_blocks (
+        id INTEGER PRIMARY KEY,
+        name TEXT NOT NULL,
+        text TEXT NOT NULL,
+        old_versions_json TEXT NOT NULL DEFAULT '[]',
+        link_slot INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )""",
+    """CREATE TABLE description_templates (
+        id INTEGER PRIMARY KEY,
+        name TEXT NOT NULL,
+        position INTEGER NOT NULL,
+        is_default INTEGER NOT NULL DEFAULT 0,
+        sections_json TEXT NOT NULL DEFAULT '[]',
+        rules_json TEXT NOT NULL DEFAULT '[]',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )""",
+    """CREATE TABLE template_choices (
+        video_id TEXT PRIMARY KEY,
+        template_id INTEGER,
+        excluded INTEGER NOT NULL DEFAULT 0,
+        updated_at TEXT NOT NULL
+    )""",
+    """CREATE TABLE template_settings (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+    )""",
+    """CREATE TABLE playlists (
+        playlist_id TEXT PRIMARY KEY,
+        title TEXT NOT NULL DEFAULT ''
+    )""",
+    """CREATE TABLE playlist_items (
+        playlist_id TEXT NOT NULL,
+        video_id TEXT NOT NULL,
+        position INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (playlist_id, video_id)
+    )""",
+    "CREATE INDEX idx_playlist_items_video ON playlist_items(video_id)",
+)
+
 MIGRATIONS: tuple[tuple[str, ...], ...] = (
     _SCHEMA_V1, _SCHEMA_V2, _SCHEMA_V3, _SCHEMA_V4, _SCHEMA_V5, _SCHEMA_V6, _SCHEMA_V7,
     _SCHEMA_V8, _SCHEMA_V9, _SCHEMA_V10, _SCHEMA_V11, _SCHEMA_V12, _SCHEMA_V13, _SCHEMA_V14, _SCHEMA_V15,
-    _SCHEMA_V16, _SCHEMA_V17,
+    _SCHEMA_V16, _SCHEMA_V17, _SCHEMA_V18,
 )
 
 _ORDER_COLUMNS = frozenset(
@@ -741,6 +785,50 @@ class CustomRule:
     created_at: str
 
 
+# Description templates: what a section or a rule may be (checked on save).
+PER_VIDEO_SECTIONS = ("opening", "about", "chapters", "watch_next", "hashtags")
+RULE_KINDS = ("playlist", "title_word", "tag")
+RULE_VALUE_MAX = 100
+TEMPLATE_NAME_MAX = 100
+BLOCK_TEXT_MAX = 5000  # YouTube's description limit; a block cannot be longer than a description
+
+
+@dataclass(frozen=True)
+class TemplateBlock:
+    """A fixed text block shared by the channel's description templates (for example "Support and follow")."""
+
+    id: int
+    name: str
+    text: str  # the current text, may be several lines
+    old_versions: tuple[str, ...]  # earlier texts, newest first
+    link_slot: bool  # a disclosure: the links right below it are each video's own
+    created_at: str = ""
+    updated_at: str = ""
+
+
+@dataclass(frozen=True)
+class DescriptionTemplate:
+    """An ordered list of sections a video's description should follow, with the rules that pick its videos."""
+
+    id: int
+    name: str
+    position: int  # priority order, 0 first
+    is_default: bool  # at most one template
+    sections: tuple[dict[str, Any], ...]  # {"kind": "opening" | ... | "block", "block_id": N for a block}
+    rules: tuple[dict[str, Any], ...]  # {"kind": "playlist" | "title_word" | "tag", "value": V}
+    created_at: str = ""
+    updated_at: str = ""
+
+
+@dataclass(frozen=True)
+class Playlist:
+    """One YouTube playlist of the channel: its title and its videos, in playlist order."""
+
+    playlist_id: str
+    title: str
+    video_ids: tuple[str, ...]
+
+
 @dataclass(frozen=True)
 class TranslationRecord:
     """One machine translation of a video's title and description, with its checks."""
@@ -872,6 +960,66 @@ class OutlierReport:
     output_tokens: int
     cost_usd: float | None
     created_at: str
+
+
+def _clean_name(name: str, what: str) -> str:
+    name = " ".join((name or "").split())
+    if not name:
+        raise ValueError(f"Give the {what} a name.")
+    if len(name) > TEMPLATE_NAME_MAX:
+        raise ValueError(f"The {what} name can be at most {TEMPLATE_NAME_MAX} characters.")
+    return name
+
+
+def _clean_block_text(text: str) -> str:
+    text = (text or "").replace("\r\n", "\n").strip()
+    if not text.strip():
+        raise ValueError("The block needs some text.")
+    if len(text) > BLOCK_TEXT_MAX:
+        raise ValueError(f"A block can be at most {BLOCK_TEXT_MAX:,} characters.")
+    if "<" in text or ">" in text:
+        raise ValueError("The block text cannot contain < or >; YouTube rejects them.")
+    return text
+
+
+def _clean_sections(sections: Sequence[Any], block_ids: set[int]) -> tuple[dict[str, Any], ...]:
+    """Check a template's sections; `block_ids` are the blocks that exist."""
+    clean: list[dict[str, Any]] = []
+    kinds: set[str] = set()
+    used: set[int] = set()
+    for section in sections:
+        kind = section.get("kind") if isinstance(section, dict) else None
+        if kind == "block":
+            block_id = section.get("block_id")
+            if not isinstance(block_id, int) or isinstance(block_id, bool) or block_id not in block_ids:
+                raise ValueError("A section uses a block that does not exist.")
+            if block_id in used:
+                raise ValueError("A block can be in a template only once.")
+            used.add(block_id)
+            clean.append({"kind": "block", "block_id": block_id})
+        elif kind in PER_VIDEO_SECTIONS:
+            if kind in kinds:
+                raise ValueError(f"The section \"{kind}\" can be in a template only once.")
+            kinds.add(kind)
+            clean.append({"kind": kind})
+        else:
+            raise ValueError(f"\"{kind}\" is not a kind of section.")
+    return tuple(clean)
+
+
+def _clean_rules(rules: Sequence[Any]) -> tuple[dict[str, Any], ...]:
+    clean: list[dict[str, Any]] = []
+    for rule in rules:
+        kind = rule.get("kind") if isinstance(rule, dict) else None
+        if kind not in RULE_KINDS:
+            raise ValueError(f"\"{kind}\" is not a kind of rule.")
+        value = " ".join(str(rule.get("value") or "").split())
+        if not value:
+            raise ValueError("A rule needs a value.")
+        if len(value) > RULE_VALUE_MAX:
+            raise ValueError(f"A rule value can be at most {RULE_VALUE_MAX} characters.")
+        clean.append({"kind": kind, "value": value})
+    return tuple(clean)
 
 
 class Store:
@@ -2236,3 +2384,213 @@ class Store:
         with self._conn:
             cur = self._conn.execute("DELETE FROM custom_rules WHERE id = ?", (id,))
         return cur.rowcount > 0
+
+    # --- description templates (v18) -----------------------------------------
+    @staticmethod
+    def _row_to_template_block(row: sqlite3.Row) -> TemplateBlock:
+        return TemplateBlock(
+            id=row["id"], name=row["name"], text=row["text"],
+            old_versions=tuple(json.loads(row["old_versions_json"])), link_slot=bool(row["link_slot"]),
+            created_at=row["created_at"], updated_at=row["updated_at"],
+        )
+
+    @staticmethod
+    def _row_to_description_template(row: sqlite3.Row) -> DescriptionTemplate:
+        return DescriptionTemplate(
+            id=row["id"], name=row["name"], position=row["position"], is_default=bool(row["is_default"]),
+            sections=tuple(json.loads(row["sections_json"])), rules=tuple(json.loads(row["rules_json"])),
+            created_at=row["created_at"], updated_at=row["updated_at"],
+        )
+
+    def add_template_block(self, name: str, text: str, link_slot: bool = False,
+                           now: datetime | None = None) -> int:
+        """Add a shared text block; returns its id. Raises ValueError for a bad name or text."""
+        name, text = _clean_name(name, "block"), _clean_block_text(text)
+        ts = _iso(now)
+        with self._conn:
+            cur = self._conn.execute(
+                "INSERT INTO template_blocks (name, text, link_slot, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?)", (name, text, int(bool(link_slot)), ts, ts))
+        return int(cur.lastrowid)  # type: ignore[arg-type]
+
+    def update_template_block(self, id: int, name: str | None = None, text: str | None = None,
+                              link_slot: bool | None = None, now: datetime | None = None) -> None:
+        """Change a block. A new text pushes the old one onto `old_versions` (newest first, no duplicates);
+        the same text again changes nothing there. Raises ValueError for a missing block or bad input."""
+        block = self.get_template_block(id)
+        if block is None:
+            raise ValueError("That block does not exist.")
+        new_name = block.name if name is None else _clean_name(name, "block")
+        new_text, old = block.text, list(block.old_versions)
+        if text is not None:
+            new_text = _clean_block_text(text)
+            if new_text != block.text:
+                old = [block.text] + [v for v in old if v not in (block.text, new_text)]
+        new_slot = block.link_slot if link_slot is None else bool(link_slot)
+        with self._conn:
+            self._conn.execute(
+                "UPDATE template_blocks SET name = ?, text = ?, old_versions_json = ?, link_slot = ?, "
+                "updated_at = ? WHERE id = ?", (new_name, new_text, _dumps(old), int(new_slot), _iso(now), id))
+
+    def list_template_blocks(self) -> list[TemplateBlock]:
+        """Every shared block, oldest first."""
+        rows = self._conn.execute("SELECT * FROM template_blocks ORDER BY id").fetchall()
+        return [self._row_to_template_block(r) for r in rows]
+
+    def get_template_block(self, id: int) -> TemplateBlock | None:
+        row = self._conn.execute("SELECT * FROM template_blocks WHERE id = ?", (id,)).fetchone()
+        return self._row_to_template_block(row) if row else None
+
+    def delete_template_block(self, id: int) -> bool:
+        """Delete a block. True when there was one. Raises ValueError while a template uses it."""
+        for template in self.list_description_templates():
+            if any(s.get("block_id") == id for s in template.sections):
+                raise ValueError(f"The template \"{template.name}\" uses this block. "
+                                 "Take it out of the template first.")
+        with self._conn:
+            cur = self._conn.execute("DELETE FROM template_blocks WHERE id = ?", (id,))
+        return cur.rowcount > 0
+
+    def add_description_template(self, name: str, sections: Sequence[dict[str, Any]],
+                                 rules: Sequence[dict[str, Any]] = (), is_default: bool = False,
+                                 now: datetime | None = None) -> int:
+        """Add a template after the others; returns its id. Raises ValueError for a bad name, section or rule."""
+        name = _clean_name(name, "template")
+        clean_sections = _clean_sections(sections, {b.id for b in self.list_template_blocks()})
+        clean_rules = _clean_rules(rules)
+        ts = _iso(now)
+        with self._conn:
+            position = self._conn.execute(
+                "SELECT COALESCE(MAX(position) + 1, 0) FROM description_templates").fetchone()[0]
+            if is_default:
+                self._conn.execute("UPDATE description_templates SET is_default = 0")
+            cur = self._conn.execute(
+                "INSERT INTO description_templates (name, position, is_default, sections_json, rules_json, "
+                "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (name, position, int(bool(is_default)), _dumps(list(clean_sections)),
+                 _dumps(list(clean_rules)), ts, ts))
+        return int(cur.lastrowid)  # type: ignore[arg-type]
+
+    def update_description_template(self, id: int, name: str | None = None,
+                                    sections: Sequence[dict[str, Any]] | None = None,
+                                    rules: Sequence[dict[str, Any]] | None = None,
+                                    now: datetime | None = None) -> None:
+        """Change a template's name, sections or rules (what is left out stays). Raises ValueError for a
+        missing template or bad input."""
+        template = self.get_description_template(id)
+        if template is None:
+            raise ValueError("That template does not exist.")
+        new_name = template.name if name is None else _clean_name(name, "template")
+        new_sections = (template.sections if sections is None
+                        else _clean_sections(sections, {b.id for b in self.list_template_blocks()}))
+        new_rules = template.rules if rules is None else _clean_rules(rules)
+        with self._conn:
+            self._conn.execute(
+                "UPDATE description_templates SET name = ?, sections_json = ?, rules_json = ?, updated_at = ? "
+                "WHERE id = ?", (new_name, _dumps(list(new_sections)), _dumps(list(new_rules)), _iso(now), id))
+
+    def list_description_templates(self) -> list[DescriptionTemplate]:
+        """Every template in priority order (`position`, 0 first)."""
+        rows = self._conn.execute("SELECT * FROM description_templates ORDER BY position, id").fetchall()
+        return [self._row_to_description_template(r) for r in rows]
+
+    def get_description_template(self, id: int) -> DescriptionTemplate | None:
+        row = self._conn.execute("SELECT * FROM description_templates WHERE id = ?", (id,)).fetchone()
+        return self._row_to_description_template(row) if row else None
+
+    def delete_description_template(self, id: int) -> bool:
+        """Delete a template and the hand-picked choices that point to it. True when there was one."""
+        with self._conn:
+            cur = self._conn.execute("DELETE FROM description_templates WHERE id = ?", (id,))
+            self._conn.execute("DELETE FROM template_choices WHERE template_id = ?", (id,))
+        return cur.rowcount > 0
+
+    def set_default_template(self, id: int | None) -> None:
+        """Make one template the default (the others lose the flag); None leaves no default.
+        Raises ValueError for a missing template."""
+        if id is not None and self.get_description_template(id) is None:
+            raise ValueError("That template does not exist.")
+        with self._conn:
+            self._conn.execute("UPDATE description_templates SET is_default = 0")
+            if id is not None:
+                self._conn.execute("UPDATE description_templates SET is_default = 1 WHERE id = ?", (id,))
+
+    def reorder_description_templates(self, ids: Sequence[int]) -> None:
+        """Set the priority order. `ids` must list every template exactly once; raises ValueError if not."""
+        ids = list(ids)
+        existing = [t.id for t in self.list_description_templates()]
+        if sorted(ids) != sorted(existing):
+            raise ValueError("The new order must list every template exactly once.")
+        with self._conn:
+            self._conn.executemany("UPDATE description_templates SET position = ? WHERE id = ?",
+                                   [(position, id) for position, id in enumerate(ids)])
+
+    # template choices per video: a template by hand, or left out of templates
+    def set_template_choice(self, video_id: str, template_id: int, now: datetime | None = None) -> None:
+        """Choose a template for a video by hand. Raises ValueError for a missing template."""
+        if self.get_description_template(template_id) is None:
+            raise ValueError("That template does not exist.")
+        with self._conn:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO template_choices (video_id, template_id, excluded, updated_at) "
+                "VALUES (?, ?, 0, ?)", (video_id, template_id, _iso(now)))
+
+    def exclude_from_templates(self, video_id: str, now: datetime | None = None) -> None:
+        """Leave a video out of description templates."""
+        with self._conn:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO template_choices (video_id, template_id, excluded, updated_at) "
+                "VALUES (?, NULL, 1, ?)", (video_id, _iso(now)))
+
+    def clear_template_choice(self, video_id: str) -> bool:
+        """Back to automatic. True when the video had a choice."""
+        with self._conn:
+            cur = self._conn.execute("DELETE FROM template_choices WHERE video_id = ?", (video_id,))
+        return cur.rowcount > 0
+
+    def template_choices(self) -> dict[str, int | None]:
+        """Video id -> the template id chosen by hand, or None when the video is excluded.
+        Videos on automatic are left out."""
+        return {r["video_id"]: (None if r["excluded"] else r["template_id"])
+                for r in self._conn.execute("SELECT * FROM template_choices")}
+
+    def templates_include_shorts(self) -> bool:
+        """Whether Shorts follow templates without a choice by hand (default: no)."""
+        row = self._conn.execute(
+            "SELECT value FROM template_settings WHERE key = 'include_shorts'").fetchone()
+        return bool(row) and row[0] == "1"
+
+    def set_templates_include_shorts(self, include: bool) -> None:
+        with self._conn:
+            self._conn.execute("INSERT OR REPLACE INTO template_settings (key, value) "
+                               "VALUES ('include_shorts', ?)", ("1" if include else "0",))
+
+    # playlists, as pulled from YouTube in a later phase; for now they are only stored and read
+    def replace_playlists(self, playlists: Mapping[str, tuple[str, Sequence[str]]]) -> None:
+        """Replace every stored playlist at once. `playlists`: playlist id -> (title, video ids in order)."""
+        with self._conn:
+            self._conn.execute("DELETE FROM playlist_items")
+            self._conn.execute("DELETE FROM playlists")
+            for playlist_id, (title, video_ids) in playlists.items():
+                self._conn.execute("INSERT INTO playlists (playlist_id, title) VALUES (?, ?)",
+                                   (playlist_id, title))
+                self._conn.executemany(
+                    "INSERT OR IGNORE INTO playlist_items (playlist_id, video_id, position) VALUES (?, ?, ?)",
+                    [(playlist_id, video_id, position) for position, video_id in enumerate(video_ids)])
+
+    def playlists(self) -> list[Playlist]:
+        """Every stored playlist, by title."""
+        items: dict[str, list[str]] = {}
+        for r in self._conn.execute("SELECT playlist_id, video_id FROM playlist_items "
+                                    "ORDER BY playlist_id, position"):
+            items.setdefault(r["playlist_id"], []).append(r["video_id"])
+        rows = self._conn.execute(
+            "SELECT * FROM playlists ORDER BY title COLLATE NOCASE, playlist_id").fetchall()
+        return [Playlist(r["playlist_id"], r["title"], tuple(items.get(r["playlist_id"], ()))) for r in rows]
+
+    def playlist_memberships(self) -> dict[str, frozenset[str]]:
+        """Video id -> the ids of the playlists it is in."""
+        found: dict[str, set[str]] = {}
+        for r in self._conn.execute("SELECT playlist_id, video_id FROM playlist_items"):
+            found.setdefault(r["video_id"], set()).add(r["playlist_id"])
+        return {video_id: frozenset(ids) for video_id, ids in found.items()}

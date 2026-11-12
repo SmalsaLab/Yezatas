@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from . import outliers, seo
+from . import descriptiontemplate, outliers, seo
 from .agent import ModelClient, ModelError
 from .copilot import Catalog, catalog_refs, numbers_in, unsupported_numbers
 from .packaging import _BadAnswer, _Tally, _format, _object, _parse_object, clean_line
@@ -172,7 +172,9 @@ def build_context(store: Store, as_of: datetime) -> StrategyContext:
               for vid, c in store.category_checks().items() if c.status == "done"}
     stale = {v.video_id: keys for v in videos
              if (keys := stale_youtube_keys(v, store.latest_translations(v.video_id)))}
-    cards = list(seo.score_catalog(videos, stale, judged, store.pinned_states()).values())
+    template_judgments, own_chars = descriptiontemplate.judge_catalog(store, videos)
+    cards = list(seo.score_catalog(videos, stale, judged, store.pinned_states(),
+                                   templates=template_judgments, own_chars=own_chars).values())
     average_seo = round(sum(c.score for c in cards) / len(cards), 1) if cards else 0.0
     titles: dict[str, str] = {}
     for card in cards:

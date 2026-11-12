@@ -12,8 +12,10 @@ from yezatas.store import (MIGRATIONS, AdCheck, Comment, CommentReply, CustomRul
 
 T0 = datetime(2026, 10, 1, 12, 0, tzinfo=timezone.utc)
 # undo the newest migrations, for tests that turn a database back into an older version
-BACK_TO_V15 = ("ALTER TABLE comment_replies DROP COLUMN posted_comment_id; "
-                "ALTER TABLE comment_replies DROP COLUMN posted_at; ")
+BACK_TO_V17 = ("DROP TABLE template_blocks; DROP TABLE description_templates; DROP TABLE template_choices; "
+                "DROP TABLE template_settings; DROP TABLE playlist_items; DROP TABLE playlists; ")
+BACK_TO_V15 = BACK_TO_V17 + ("ALTER TABLE comment_replies DROP COLUMN posted_comment_id; "
+                              "ALTER TABLE comment_replies DROP COLUMN posted_at; ")
 BACK_TO_V14 = BACK_TO_V15 + "ALTER TABLE comments DROP COLUMN by_owner; DROP TABLE category_checks; DROP TABLE pinned_comments; "
 BACK_TO_V13 = BACK_TO_V14 + "ALTER TABLE comments DROP COLUMN owner_replied; "
 BACK_TO_V12 = BACK_TO_V13 + "DROP TABLE shorts_finds; "
@@ -54,7 +56,7 @@ def store(tmp_path: Path):
 
 def test_creates_parent_dirs_and_version(tmp_path: Path) -> None:
     with Store(tmp_path / "a" / "b" / "c.sqlite") as s:
-        assert s.schema_version == len(MIGRATIONS) == 17
+        assert s.schema_version == len(MIGRATIONS) == 18
         assert s._conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
 
 
@@ -64,7 +66,7 @@ def test_migrations_idempotent_on_reopen(tmp_path: Path) -> None:
         pid = s.begin_pull("chan0000001", now=T0)
         s.upsert_video(make_video(), pid, now=T0)
     with Store(path) as s:
-        assert s.schema_version == 17
+        assert s.schema_version == 18
         assert s.get_video("vid00000001") is not None
         assert len(s.snapshots_for("vid00000001")) == 1
 
@@ -165,7 +167,7 @@ def test_v1_database_migrates_to_the_latest_and_keeps_its_data(tmp_path: Path) -
                        "DROP TABLE push_runs; " + BACK_TO_V9 + "ALTER TABLE videos DROP COLUMN gone_at; PRAGMA user_version = 1;")
     conn.close()
     with Store(path) as s:
-        assert s.schema_version == 17
+        assert s.schema_version == 18
         video = s.get_video("vid00000001")
         assert video is not None and video.title == "How to repot a cactus"
         assert s.quota_used("2026-10-01") == 1
@@ -319,7 +321,7 @@ def test_v8_database_upgrades_and_keeps_its_pushes(tmp_path: Path) -> None:
     conn.executescript(BACK_TO_V8 + "ALTER TABLE videos DROP COLUMN gone_at; PRAGMA user_version = 8;")
     conn.close()
     with Store(path) as s:
-        assert s.schema_version == 17
+        assert s.schema_version == 18
         record = s.get_push(push)
         assert record is not None and record.run_id is None and record.status == "pushed"
         assert record.before == {"title": "old"} and record.after == {"title": "new"}
@@ -336,7 +338,7 @@ def test_v9_database_upgrades_and_keeps_its_push_runs(tmp_path: Path) -> None:
     conn.executescript(BACK_TO_V9 + "ALTER TABLE videos DROP COLUMN gone_at; PRAGMA user_version = 9;")
     conn.close()
     with Store(path) as s:
-        assert s.schema_version == 17
+        assert s.schema_version == 18
         record = s.get_push(push)
         assert record is not None and record.run_id == run
         assert s.latest_copilot_chat_id() is None and s.next_copilot_chat_id() == 1
@@ -385,7 +387,7 @@ def test_v10_database_upgrades_to_v11_and_keeps_its_copilot_turns(tmp_path: Path
     conn.executescript(BACK_TO_V10 + "ALTER TABLE videos DROP COLUMN gone_at; PRAGMA user_version = 10;")
     conn.close()
     with Store(path) as s:
-        assert s.schema_version == 17
+        assert s.schema_version == 18
         assert s.get_copilot_turn(turn) is not None
         assert s.latest_link_checks() == {} and s.latest_ad_check("vid00000001") is None
 
@@ -550,7 +552,7 @@ def test_v5_database_upgrades_to_v6_and_keeps_its_data(tmp_path: Path) -> None:
                        "DROP TABLE subtitle_translations; " + BACK_TO_V8 + "ALTER TABLE videos DROP COLUMN gone_at; PRAGMA user_version = 5;")
     conn.close()
     with Store(path) as s:
-        assert s.schema_version == 17
+        assert s.schema_version == 18
         assert s.get_video("vid00000001") is not None and s.get_draft("vid00000001") is not None
         transcript = s.latest_transcript("vid00000001")
         assert transcript is not None and transcript.segments[0]["text"] == "Hello"
@@ -620,7 +622,7 @@ def test_v6_database_upgrades_to_v7_and_keeps_its_data(tmp_path: Path) -> None:
                        "" + BACK_TO_V8 + "ALTER TABLE videos DROP COLUMN gone_at; PRAGMA user_version = 6;")
     conn.close()
     with Store(path) as s:
-        assert s.schema_version == 17
+        assert s.schema_version == 18
         assert s.get_video("vid00000001") is not None
         assert len(s.list_subtitle_translations("vid00000001")) == 1
         assert s.latest_packaging_review("vid00000001") is None
@@ -667,7 +669,7 @@ def test_v7_database_upgrades_to_v8_and_keeps_its_data(tmp_path: Path) -> None:
     conn.executescript("DROP TABLE outlier_reports; " + BACK_TO_V8 + "ALTER TABLE videos DROP COLUMN gone_at; PRAGMA user_version = 7;")
     conn.close()
     with Store(path) as s:
-        assert s.schema_version == 17
+        assert s.schema_version == 18
         assert s.get_video("vid00000001") is not None
         assert s.latest_packaging_review("vid00000001") is not None
         assert s.latest_outlier_report() is None
@@ -772,7 +774,7 @@ def test_v15_database_upgrades_to_v16_and_keeps_its_replies(tmp_path: Path) -> N
     conn.executescript(BACK_TO_V15 + "ALTER TABLE videos DROP COLUMN gone_at; PRAGMA user_version = 15;")
     conn.close()
     with Store(path) as s:
-        assert s.schema_version == 17
+        assert s.schema_version == 18
         row = s.get_comment_reply(rid)
         assert (row.text, row.status, row.posted_comment_id, row.posted_at) == ("Weekly.", "open", "", "")
 
@@ -844,7 +846,7 @@ def test_v12_database_upgrades_to_v13_and_keeps_its_data(tmp_path: Path) -> None
     conn.executescript(BACK_TO_V12 + "ALTER TABLE videos DROP COLUMN gone_at; PRAGMA user_version = 12;")
     conn.close()
     with Store(path) as s:
-        assert s.schema_version == 17
+        assert s.schema_version == 18
         assert s.list_custom_rules()[0].name == "Newsletter link"
         assert s.latest_shorts_find("vid00000001") is None
         from yezatas.store import ShortsFind
@@ -862,7 +864,7 @@ def test_v11_database_upgrades_to_v12_and_keeps_its_data(tmp_path: Path) -> None
     conn.executescript(BACK_TO_V11 + "ALTER TABLE videos DROP COLUMN gone_at; PRAGMA user_version = 11;")
     conn.close()
     with Store(path) as s:
-        assert s.schema_version == 17
+        assert s.schema_version == 18
         assert s.get_copilot_turn(turn) is not None
         assert set(s.latest_link_checks()) == {"https://example.com/page"}
         assert s.list_comments("vid00000001") == [] and s.list_reply_templates() == []
@@ -896,7 +898,7 @@ def test_v13_database_upgrades_to_v14_and_keeps_its_comments(tmp_path: Path) -> 
     conn.executescript(BACK_TO_V13 + "ALTER TABLE videos DROP COLUMN gone_at; PRAGMA user_version = 13;")
     conn.close()
     with Store(path) as s:
-        assert s.schema_version == 17
+        assert s.schema_version == 18
         kept = s.list_comments("vid00000001")
         assert [c.comment_id for c in kept] == ["cmt00000001"] and kept[0].owner_replied is False
 
@@ -922,3 +924,266 @@ def test_comments_to_answer_skips_answered_used_and_dismissed(store: Store) -> N
     store.upsert_comments([make_comment("cmt00000001", published_at="2026-09-05T10:00:00Z",
                                         owner_replied=True)], now=T0)
     assert [c.comment_id for c in store.comments_to_answer()] == ["cmt00000005"]
+
+
+# --- description templates (v18) ---
+
+SUPPORT_TEXT = "Support the garden channel:\nhttps://shop.test/support"
+
+
+def test_v17_database_upgrades_to_v18_and_keeps_its_data(tmp_path: Path) -> None:
+    path = tmp_path / "v17.sqlite"
+    with Store(path) as s:
+        pid = s.begin_pull("chan0000001", now=T0)
+        s.upsert_video(make_video(), pid, now=T0)
+        rid = s.add_comment_reply("vid00000001", "cmt00000001", "Weekly.", "muse-spark-1.3", [], now=T0)
+    conn = sqlite3.connect(path)
+    conn.executescript(BACK_TO_V17 + "PRAGMA user_version = 17;")
+    conn.close()
+    with Store(path) as s:
+        assert s.schema_version == 18
+        assert s.get_video("vid00000001").title == "How to repot a cactus"
+        assert s.get_comment_reply(rid).text == "Weekly."
+        assert s.list_template_blocks() == [] and s.list_description_templates() == []
+        assert s.template_choices() == {} and s.templates_include_shorts() is False
+        assert s.playlists() == [] and s.playlist_memberships() == {}
+
+
+def test_template_block_round_trip(store: Store) -> None:
+    bid = store.add_template_block("  Support   and follow ", SUPPORT_TEXT + "\r\n", now=T0)
+    block = store.get_template_block(bid)
+    assert block is not None
+    assert (block.name, block.text, block.old_versions, block.link_slot) == (
+        "Support and follow", SUPPORT_TEXT, (), False)
+    assert block.created_at == block.updated_at == T0.isoformat()
+    paid = store.add_template_block("Paid links", "Some links below are paid links.", link_slot=True)
+    assert [b.id for b in store.list_template_blocks()] == [bid, paid]
+    assert store.get_template_block(paid).link_slot is True
+    assert store.get_template_block(999) is None
+
+
+@pytest.mark.parametrize("name, text, message", [
+    ("", "Text", "Give the block a name."),
+    ("x" * 101, "Text", "at most 100 characters"),
+    ("Support", "   \n ", "The block needs some text."),
+    ("Support", "Shop <here>", "cannot contain < or >"),
+    ("Support", "a > b", "cannot contain < or >"),
+    ("Support", "x" * 5001, "at most 5,000 characters"),
+])
+def test_template_block_validation(store: Store, name: str, text: str, message: str) -> None:
+    with pytest.raises(ValueError, match=message):
+        store.add_template_block(name, text)
+    assert store.list_template_blocks() == []
+
+
+def test_updating_a_block_keeps_old_versions_newest_first_without_duplicates(store: Store) -> None:
+    bid = store.add_template_block("Support", "First text.")
+    store.update_template_block(bid, text="Second text.")
+    store.update_template_block(bid, text="Second text.")  # unchanged: adds nothing
+    store.update_template_block(bid, text="Third text.")
+    assert store.get_template_block(bid).old_versions == ("Second text.", "First text.")
+    store.update_template_block(bid, text="First text.")  # back to an old text: it leaves the old list
+    block = store.get_template_block(bid)
+    assert block.text == "First text." and block.old_versions == ("Third text.", "Second text.")
+    store.update_template_block(bid, name="Support and follow", link_slot=True, now=T0)
+    block = store.get_template_block(bid)
+    assert (block.name, block.text, block.link_slot, block.updated_at) == (
+        "Support and follow", "First text.", True, T0.isoformat())
+    assert block.old_versions == ("Third text.", "Second text.")
+
+
+def test_updating_a_block_validates(store: Store) -> None:
+    bid = store.add_template_block("Support", "First text.")
+    with pytest.raises(ValueError, match="does not exist"):
+        store.update_template_block(999, text="x")
+    with pytest.raises(ValueError, match="< or >"):
+        store.update_template_block(bid, text="<b>")
+    with pytest.raises(ValueError, match="name"):
+        store.update_template_block(bid, name=" ")
+    assert store.get_template_block(bid).text == "First text."
+
+
+def test_a_used_block_cannot_be_deleted(store: Store) -> None:
+    bid = store.add_template_block("Support", SUPPORT_TEXT)
+    tid = store.add_description_template("Main", [{"kind": "block", "block_id": bid}])
+    with pytest.raises(ValueError, match='"Main" uses this block'):
+        store.delete_template_block(bid)
+    store.update_description_template(tid, sections=[{"kind": "opening"}])
+    assert store.delete_template_block(bid) is True
+    assert store.delete_template_block(bid) is False and store.list_template_blocks() == []
+
+
+def test_description_template_round_trip(store: Store) -> None:
+    bid = store.add_template_block("Support", SUPPORT_TEXT)
+    sections = [{"kind": "opening"}, {"kind": "chapters"}, {"kind": "block", "block_id": bid},
+                {"kind": "hashtags"}]
+    rules = [{"kind": "playlist", "value": "PLbeds"}, {"kind": "title_word", "value": " raised   bed "},
+             {"kind": "tag", "value": "compost"}]
+    tid = store.add_description_template("  Main ", sections, rules, now=T0)
+    tpl = store.get_description_template(tid)
+    assert tpl is not None
+    assert (tpl.name, tpl.position, tpl.is_default) == ("Main", 0, False)
+    assert tpl.sections == tuple(sections)
+    assert tpl.rules == ({"kind": "playlist", "value": "PLbeds"}, {"kind": "title_word", "value": "raised bed"},
+                         {"kind": "tag", "value": "compost"})
+    assert tpl.created_at == T0.isoformat()
+    second = store.add_description_template("Shorts", [{"kind": "opening"}])
+    assert store.get_description_template(second).position == 1 and store.get_description_template(999) is None
+
+
+def test_updating_a_template_keeps_what_is_left_out(store: Store) -> None:
+    tid = store.add_description_template("Main", [{"kind": "opening"}], [{"kind": "tag", "value": "soil"}])
+    store.update_description_template(tid, name="Main template")
+    tpl = store.get_description_template(tid)
+    assert tpl.name == "Main template" and tpl.sections == ({"kind": "opening"},)
+    assert tpl.rules == ({"kind": "tag", "value": "soil"},)
+    store.update_description_template(tid, sections=[{"kind": "about"}], rules=[])
+    tpl = store.get_description_template(tid)
+    assert tpl.sections == ({"kind": "about"},) and tpl.rules == ()
+    with pytest.raises(ValueError, match="does not exist"):
+        store.update_description_template(999, name="x")
+    with pytest.raises(ValueError, match="not a kind of section"):
+        store.update_description_template(tid, sections=[{"kind": "footer"}])
+    assert store.get_description_template(tid).sections == ({"kind": "about"},)
+
+
+@pytest.mark.parametrize("sections, message", [
+    ([{"kind": "footer"}], '"footer" is not a kind of section'),
+    (["opening"], "is not a kind of section"),
+    ([{"kind": "block", "block_id": 999}], "a block that does not exist"),
+    ([{"kind": "block"}], "a block that does not exist"),
+    ([{"kind": "block", "block_id": True}], "a block that does not exist"),
+    ([{"kind": "block", "block_id": "BLOCK"}, {"kind": "block", "block_id": "BLOCK"}],
+     "A block can be in a template only once"),
+    ([{"kind": "opening"}, {"kind": "about"}, {"kind": "opening"}], '"opening" can be in a template only once'),
+])
+def test_template_section_validation(store: Store, sections, message) -> None:
+    bid = store.add_template_block("Support", SUPPORT_TEXT)
+    sections = [{**s, "block_id": bid} if isinstance(s, dict) and s.get("block_id") == "BLOCK" else s
+                for s in sections]
+    with pytest.raises(ValueError, match=message):
+        store.add_description_template("Main", sections)
+    assert store.list_description_templates() == []
+
+
+@pytest.mark.parametrize("rules, message", [
+    ([{"kind": "channel", "value": "x"}], '"channel" is not a kind of rule'),
+    ([{"value": "x"}], "is not a kind of rule"),
+    (["tag"], "is not a kind of rule"),
+    ([{"kind": "tag", "value": "   "}], "A rule needs a value"),
+    ([{"kind": "tag"}], "A rule needs a value"),
+    ([{"kind": "title_word", "value": "x" * 101}], "at most 100 characters"),
+])
+def test_template_rule_validation(store: Store, rules, message) -> None:
+    with pytest.raises(ValueError, match=message):
+        store.add_description_template("Main", [{"kind": "opening"}], rules)
+    assert store.list_description_templates() == []
+
+
+def test_a_rule_value_of_100_characters_is_fine(store: Store) -> None:
+    tid = store.add_description_template("Main", [], [{"kind": "tag", "value": "x" * 100}])
+    assert store.get_description_template(tid).rules[0]["value"] == "x" * 100
+
+
+@pytest.mark.parametrize("name, message", [("", "Give the template a name."),
+                                           ("   ", "Give the template a name."),
+                                           ("x" * 101, "at most 100 characters")])
+def test_template_name_validation(store: Store, name: str, message: str) -> None:
+    with pytest.raises(ValueError, match=message):
+        store.add_description_template(name, [])
+
+
+def test_only_one_default_template(store: Store) -> None:
+    first = store.add_description_template("Main", [], is_default=True)
+    second = store.add_description_template("Shorts", [], is_default=True)
+    assert [t.is_default for t in store.list_description_templates()] == [False, True]
+    store.set_default_template(first)
+    assert {t.id: t.is_default for t in store.list_description_templates()} == {first: True, second: False}
+    store.set_default_template(None)
+    assert not any(t.is_default for t in store.list_description_templates())
+    with pytest.raises(ValueError, match="does not exist"):
+        store.set_default_template(999)
+
+
+def test_reorder_templates(store: Store) -> None:
+    a = store.add_description_template("A", [])
+    b = store.add_description_template("B", [])
+    c = store.add_description_template("C", [])
+    store.reorder_description_templates([c, a, b])
+    assert [(t.id, t.position) for t in store.list_description_templates()] == [(c, 0), (a, 1), (b, 2)]
+    for bad in ([c, a], [c, a, b, a], [c, a, 999]):
+        with pytest.raises(ValueError, match="every template exactly once"):
+            store.reorder_description_templates(bad)
+    assert [t.id for t in store.list_description_templates()] == [c, a, b]
+
+
+def test_deleting_a_template_drops_its_choices(store: Store) -> None:
+    main = store.add_description_template("Main", [])
+    other = store.add_description_template("Other", [])
+    store.set_template_choice("vid00000001", main)
+    store.set_template_choice("vid00000002", other)
+    store.exclude_from_templates("vid00000003")
+    assert store.delete_description_template(main) is True
+    assert store.template_choices() == {"vid00000002": other, "vid00000003": None}
+    assert store.delete_description_template(main) is False
+    assert [t.id for t in store.list_description_templates()] == [other]
+
+
+def test_template_choices(store: Store) -> None:
+    main = store.add_description_template("Main", [])
+    assert store.template_choices() == {}
+    store.set_template_choice("vid00000001", main, now=T0)
+    store.exclude_from_templates("vid00000002", now=T0)
+    assert store.template_choices() == {"vid00000001": main, "vid00000002": None}
+    store.exclude_from_templates("vid00000001")  # a choice replaces the one before
+    store.set_template_choice("vid00000002", main)
+    assert store.template_choices() == {"vid00000001": None, "vid00000002": main}
+    assert store.clear_template_choice("vid00000001") is True
+    assert store.clear_template_choice("vid00000001") is False
+    assert store.template_choices() == {"vid00000002": main}
+    with pytest.raises(ValueError, match="does not exist"):
+        store.set_template_choice("vid00000003", 999)
+    assert "vid00000003" not in store.template_choices()
+
+
+def test_templates_include_shorts_setting(store: Store) -> None:
+    assert store.templates_include_shorts() is False
+    store.set_templates_include_shorts(True)
+    assert store.templates_include_shorts() is True
+    store.set_templates_include_shorts(False)
+    assert store.templates_include_shorts() is False
+
+
+def test_playlists_round_trip_and_memberships(store: Store) -> None:
+    store.replace_playlists({
+        "PLsoil": ("soil basics", ["vid00000002", "vid00000001"]),
+        "PLbeds": ("Raised bed builds", ["vid00000001", "vid00000001"]),  # a repeat is stored once
+        "PLempty": ("An empty list", []),
+    })
+    assert [(p.playlist_id, p.title, p.video_ids) for p in store.playlists()] == [
+        ("PLempty", "An empty list", ()),
+        ("PLbeds", "Raised bed builds", ("vid00000001",)),
+        ("PLsoil", "soil basics", ("vid00000002", "vid00000001")),
+    ]
+    assert store.playlist_memberships() == {"vid00000001": frozenset({"PLsoil", "PLbeds"}),
+                                            "vid00000002": frozenset({"PLsoil"})}
+    store.replace_playlists({"PLnew": ("Compost", ["vid00000003"])})
+    assert [p.playlist_id for p in store.playlists()] == ["PLnew"]
+    assert store.playlist_memberships() == {"vid00000003": frozenset({"PLnew"})}
+    store.replace_playlists({})
+    assert store.playlists() == [] and store.playlist_memberships() == {}
+
+
+def test_replacing_playlists_is_all_or_nothing(store: Store) -> None:
+    store.replace_playlists({"PLbeds": ("Raised bed builds", ["vid00000001"])})
+
+    def failing_ids():
+        yield "vid00000002"
+        raise RuntimeError("the pull broke")
+
+    with pytest.raises(RuntimeError):
+        store.replace_playlists({"PLsoil": ("Soil", ["vid00000003"]), "PLbad": ("Bad", failing_ids())})
+    assert [(p.playlist_id, p.video_ids) for p in store.playlists()] == [("PLbeds", ("vid00000001",))]
+    with pytest.raises(sqlite3.IntegrityError):
+        store.replace_playlists({"PLsoil": ("Soil", ["vid00000003"]), "PLbad": (None, [])})  # type: ignore[dict-item]
+    assert store.playlist_memberships() == {"vid00000001": frozenset({"PLbeds"})}

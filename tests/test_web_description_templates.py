@@ -778,7 +778,29 @@ def test_the_pull_button_and_its_line(tmp_path: Path, no_real_client: None) -> N
     with store_of(ui) as store:
         store.replace_playlists({"PLa": ("A", []), "PLb": ("B", [])})
     assert "2 playlists stored. Pulling only reads from YouTube." in page(ui, f"?template={reviews}")
-    assert 'id="playlists-pull"' not in section(page(ui), "template")  # the default template has no rules
+
+
+def test_the_pull_form_on_the_default_template(tmp_path: Path, no_real_client: None) -> None:
+    ui, _ = pull_ui(tmp_path)
+    main = next(t.id for t in templates_of(ui) if t.is_default)
+    form = section(page(ui), "template")
+    rules = form[form.index('id="rules"'):]
+    sentence = rules.index("Takes every video no other template claims.")
+    pull = rules.index('id="playlists-pull"')
+    assert sentence < pull
+    assert f'<input type="hidden" name="template" value="{main}">' in rules[pull:rules.index("</form>", pull)]
+    assert "No playlists stored yet. Pulling only reads from YouTube." in rules
+    assert 'id="rule-add"' not in form  # still no Add rule on the default
+    resp = nf(ui, PULL, data={"template": str(main)})
+    assert resp.headers["location"] == f"{URL}?template={main}#rules"
+    assert "Read 2 playlists with 3 videos. Used 4 quota units." in flashes(ui, f"?template={main}")
+    assert "2 playlists stored. Pulling only reads from YouTube." in page(ui, f"?template={main}")
+
+
+def test_no_pull_form_without_templates(tmp_path: Path, no_real_client: None) -> None:
+    ui = make_dt_ui(tmp_path)
+    html = page(ui)
+    assert 'id="tp-empty"' in html and 'id="playlists-pull"' not in html
 
 
 def test_pulling_stores_the_playlists(tmp_path: Path, no_real_client: None) -> None:

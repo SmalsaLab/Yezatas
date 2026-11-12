@@ -43,6 +43,7 @@ Built for the Meta Global AI Developer Hackathon (Indie Dev track, "Build for Yo
 - [How It Works](#how-it-works)
 - [Design Philosophy](#design-philosophy)
 - [Built During the Hackathon](#built-during-the-hackathon)
+- [After the Hackathon](#after-the-hackathon)
 - [License](#license)
 
 ---
@@ -53,7 +54,7 @@ Built for the Meta Global AI Developer Hackathon (Indie Dev track, "Build for Yo
 |---|---|---|
 | **Configuration** | Configuration | A guided connection to YouTube, a connection check with specific fixes, and a read-only catalog pull with its quota cost shown first. The **Primary AI** choice: Muse Spark through Meta's Model API, or Muse Glimmer on this computer through Ollama (no key, nothing leaves the machine). |
 | **Daily** | Today, Comments, Videos, Analytics | Today: the channel's last 7 days, what needs an answer and the videos to fix next. A sidebar that counts what is waiting (questions, drafts, videos under 50, translations out of date, broken links). The channel's and each video's last 28 days from YouTube Analytics (read-only), with traffic sources and countries. |
-| **Audit** | SEO overview, Videos, Video | A 27-check SEO scorecard per video with a one-line fix for each, **Fix next** ranked by views × missing points, and a searchable table that sorts by any column. The video page shows what to fix first, quick-info tiles that open the place where each thing is changed, and a Details section: the category checked by Muse Spark, and whether a comment from the channel is there to pin (with a suggestion to post). |
+| **Audit** | SEO overview, Videos, Video | A 29-check SEO scorecard per video with a one-line fix for each, **Fix next** ranked by views × missing points, and a searchable table that sorts by any column. The video page shows what to fix first, quick-info tiles that open the place where each thing is changed, and a Details section: the category checked by Muse Spark, and whether a comment from the channel is there to pin (with a suggestion to post). |
 | **Edit safely** | Changes, History | Drafts shown as diffs, approved one by one, pushed with a quota preview; a backup before every update, restore one video or undo a whole push. |
 | **Suggest** | Video, Copilot | A suggestion agent with read-only tools and a fact guard, and a channel copilot with the whole catalog in one context. Edits are only ever proposals. |
 | **Translate** | Translate, Subtitles, Translations | Titles, descriptions and subtitles translated by one Meta model and checked blind by another (in fully local mode, Muse Glimmer does both, and the page says so); every link, time and number must survive. A glossary of the creator's terms (kept as they are or with a fixed translation), checked by code, and a list of every translation made from older text. |
@@ -61,6 +62,7 @@ Built for the Meta Global AI Developer Hackathon (Indie Dev track, "Build for Yo
 | **Packaging** | Packaging | The title and thumbnail judged together, measured by code and SAM 3.1, with variant ideas to download, preview in a feed or set as the thumbnail after a confirmation (the old one is saved in History). |
 | **Insights** | Outliers, Strategy, Competitors, Search gaps | Which videos beat the channel's own norm for their age, and what the winners share; a strategy report with next video ideas, each tied to the channel's own videos; the same outlier rule on up to 5 other public channels; and the real YouTube search terms whose words are missing from the titles. |
 | **Links and bulk** | Links, Bulk edit | Every link ranked by reach with a dead-link check. **Bulk edit works like a coding agent for your channel:** say what to change in plain words, and Muse Spark searches every video with tools, stages the edits and shows every diff. Find & replace and footer blocks are there too, with no model. |
+| **Description templates** | Description templates, Video, Videos | Templates set the structure of every description: an ordered list of sections, with shared blocks (support links, a paid-links disclosure) written once and reused. Rules pick each video's template (a playlist, a word in the title, a tag), **Build from my channel** finds the text your descriptions already repeat, and **Apply template** puts a description in order as a draft without rewording the video's own text. Code only, no model. |
 | **Ad safety** | Video | An advertiser-friendly check of the title, description, tags and transcript; every quote is checked by code. Advice only. |
 | **Community** | Video, Comments, Replies, Affiliate, Checks | Comments sorted with reply drafts to copy, or to post to YouTube after you check the exact text and confirm (each post is listed in History) (the API cannot pin a comment, so a pinned draft is pinned in Studio), reply templates, the creator's own affiliate rules as drafts, and custom checks described in plain words. |
 
@@ -157,6 +159,9 @@ src/yezatas/
   catalog.py, store.py       # the catalog pull and the local SQLite store (snapshots, drafts, backups)
   quota.py                   # the daily quota ledger and cost previews
   seo.py                     # the SEO scorecard
+  descriptiontemplate.py     # description templates: which template a video follows, the line parser, Apply
+  templatebuild.py           # Build from my channel: text that repeats across descriptions, as shared blocks
+  playlistpull.py            # read the channel's playlists (read only), for templates that claim by playlist
   validate.py, facts.py      # the edit validator and the fact guard
   edits.py, diffs.py, push.py, bulk.py   # drafts, diffs, approve and push, bulk edits
   bulkagent.py               # the bulk edit agent: plain words in, tools over the catalog, staged edits out
@@ -226,8 +231,9 @@ be in the text they name.
 
 ## Built During the Hackathon
 
-Everything in this repository was written during the build window (Oct 27 – Nov 4, 2026). This log lists each feature
-as it lands; the git history is the detailed record.
+Everything in this log was written during the build window (Oct 27 – Nov 4, 2026). It lists each feature
+as it landed; the git history is the detailed record. Work done since then is under
+[After the Hackathon](#after-the-hackathon).
 
 - **2026-10-29**: repository created: license, README, `.gitignore` (secrets and channel data are never committed).
 - **2026-10-29**: Google Cloud OAuth setup guide ([docs/SETUP_GOOGLE.md](docs/SETUP_GOOGLE.md)).
@@ -562,6 +568,34 @@ as it lands; the git history is the detailed record.
 - **2026-11-04**: **YouTube API limits.** A button on Bulk edit opens a table of what YouTube's API can do, can do in part and
   cannot do, what each means and where to do it instead, so nobody has to ask the agent first. Every row was checked
   against Google's documentation and YouTube Help. Built and tested by Claude Code.
+
+---
+## After the Hackathon
+
+Built after the submission (Nov 4, 2026), in the same way: Claude Code as orchestrator writes each brief, a builder
+writes the code and tests, and the orchestrator reads the diff and runs the whole suite before anything is committed.
+
+- **2026-11-12**: **description templates.** A channel defines templates, each an ordered list of sections: the
+  video's own parts (opening, about, chapters, Watch next, hashtags) and **shared blocks** that are written once and
+  reused, such as support links or a paid-links disclosure with each video's own links under it.
+  - **Which template a video follows.** Rules, first match: a playlist, a word in the title or a tag; a default
+    template takes the rest; a choice by hand wins; Shorts are left out unless a setting turns them on. The page
+    always says why.
+  - **The check.** Code reads each description line by line into the template's sections. A new 10-point check,
+    "Follows the description template", gives 7 points for shared blocks that are present and current (half for an
+    older version of a block) and 3 for the order. A new 3-point check fails an opening that another video also
+    uses, and the length check now counts only the video's own text. The scorecard is 29 checks.
+  - **Description templates page.** Shared blocks, templates, rules and section order, counts of the videos that
+    follow their template or need changes, and a preview of one video read into the sections. **Build from my
+    channel** finds the lines that already repeat across descriptions and offers each group as a shared block,
+    with its older versions. **Pull playlists** reads the channel's playlists (read only, charged to the quota
+    guard first).
+  - **Video page.** A template menu, a read-only Sections view, and **Apply template**: it puts the sections in
+    order with the shared blocks current, keeps every other line unless you tick it, never rewords the video's own
+    text, and only saves a draft for Changes.
+  - **Videos table.** A Template column and filter, and one bar that sets the template of the ticked videos.
+  - No model is used anywhere in this feature, and nothing is written to YouTube without the usual approval and
+    push. Tested with made-up videos and a faked YouTube API; not yet run on a real channel.
 
 ---
 

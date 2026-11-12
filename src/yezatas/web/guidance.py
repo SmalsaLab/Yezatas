@@ -25,6 +25,9 @@ AUTH_REASONS = frozenset({
 MAX_DETAIL = 300
 
 SIGN_IN_AGAIN = "Sign in again (step 6)."
+# why a saved sign-in stops working; also the text of step 6 when the saved sign-in is rejected
+SIGN_IN_REJECTED = ("Google no longer accepts the saved sign-in. In Testing mode it expires after "
+                    "7 days, or it may have been revoked.")
 NO_CHANNEL_TEXT = (
     "This Google account has no YouTube channel. Sign in with the channel's account, or pick "
     "the brand account on Google's screen."
@@ -84,10 +87,7 @@ def map_api_error(exc: BaseException) -> tuple[str, str]:
         reason = f" ({info.reason})" if info.reason else ""
         return kind, _short(f"YouTube returned an error: {status}{reason}. {info.message}")
     if isinstance(exc, RefreshError):
-        return "auth", (
-            "Google no longer accepts the saved sign-in. In Testing mode it expires after "
-            "7 days, or it may have been revoked. " + SIGN_IN_AGAIN
-        )
+        return "auth", SIGN_IN_REJECTED + " " + SIGN_IN_AGAIN
     if isinstance(exc, NeedsSignIn):
         return "auth", "You are not signed in, or the saved sign-in is no longer valid. " + SIGN_IN_AGAIN
     if isinstance(exc, NoChannelError):

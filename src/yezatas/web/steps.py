@@ -26,6 +26,16 @@ class CheckState:
     has_uploads: bool = False
 
 
+def sign_in_rejected(signed_in: bool, check: CheckState | None, pull: JobSnapshot) -> bool:
+    """A token is saved, but Google no longer accepts it: the last connection check failed with an
+    "auth" error, or (with no successful check since) the last pull did."""
+    if not signed_in:
+        return False
+    if check is not None:
+        return not check.ok and check.kind == "auth"
+    return pull.status == "failed" and pull.error_kind == "auth"
+
+
 @dataclass(frozen=True)
 class Step:
     number: int
@@ -117,6 +127,8 @@ def compute_steps(
         s6 = Step(6, "signin", title6, "working")
     elif check_kind == "auth":
         s6 = Step(6, "signin", title6, "problem", check.message)  # type: ignore[union-attr]
+    elif sign_in_rejected(signed_in, check, pull):
+        s6 = Step(6, "signin", title6, "problem", pull.message)
     elif signed_in:
         s6 = Step(6, "signin", title6, "done")
     elif signin_failed:

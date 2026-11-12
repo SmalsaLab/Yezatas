@@ -323,6 +323,13 @@
       email in step 4 (Audience, Test users, Save), click <strong>Cancel</strong> here, then sign in again.</p>
     <p class="hint">If you do not see the tab, look behind your other windows. This stops waiting after 5 minutes.</p>
     {{ post_button('/configuration/signin/cancel', 'Cancel', 'secondary') }}
+  {% elif sign_in_rejected %}
+    <p id="signin-rejected">{{ sign_in_rejected_text }} Sign in again with the same account.</p>
+    <p class="hint">Signing in again asks for <strong>read-only</strong> access, like the first time, and
+      replaces the saved token.{% if can_edit %} Yezatas asks again for permission to edit your videos
+      before your next push.{% endif %}</p>
+    {{ post_button('/configuration/signin', 'Sign in again') }}
+    {{ post_button('/configuration/signout', 'Sign out', 'secondary') }}
   {% elif signed_in %}
     {% if can_edit %}
     <p>You are signed in, and you allowed Yezatas to edit your videos when you first pushed a change. Yezatas
@@ -371,7 +378,9 @@
     <p class="waiting"><span class="spinner" aria-hidden="true"></span>
       <span id="pull-msg">{{ pull.message or 'Starting…' }}</span></p>
   {% elif not steps.pull.enabled or not estimate %}
-    {% if signed_in and not check %}
+    {% if sign_in_rejected %}
+    <p>Sign in again first (step 6).</p>
+    {% elif signed_in and not check %}
     <p>Yezatas checks the connection again first (1 quota unit), then pulls.</p>
     {{ post_button('/configuration/pull', 'Check and pull', 'primary') }}
     {% else %}

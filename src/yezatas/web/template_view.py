@@ -62,6 +62,8 @@ class CoverView:
     excluded: int
     no_template: int
     needs_url: str  # the Videos filter for videos that fail the template check
+    excluded_url: str = "/videos?template=excluded"  # the Videos filter for videos left out
+    none_url: str = "/videos?template=none"  # the Videos filter for videos no template applies to
 
 
 @dataclass(frozen=True)

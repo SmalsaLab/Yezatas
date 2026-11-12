@@ -410,6 +410,16 @@ a.chip:hover { background: var(--line); }
 .vtable .col-num { width: 80px; text-align: right; }
 .vtable .col-ratio { width: 84px; text-align: right; }
 .vtable .col-score { width: 90px; text-align: right; }
+.vtable .col-pick { width: 36px; padding-right: 0; }
+.vtable .col-pick input { width: 18px; height: 18px; margin: 0; vertical-align: middle; accent-color: var(--text); }
+.vtable .col-template { width: 150px; }
+/* with the Template column, a mid-size window drops the columns the phone layout drops, to keep the title readable */
+@media (max-width: 1199px) { .vtable.with-template .col-vis, .vtable.with-template .col-ratio { display: none; } }
+.vt-tpl { display: block; font-weight: 500; overflow-wrap: anywhere; }
+.vt-tpl-why { display: block; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+.vt-bulkbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0 0 10px; padding: 8px 10px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); }
+.vt-bulkbar label { margin: 0; color: var(--muted); font-size: 13px; }
+.vt-bulkbar select { flex: 0 1 240px; min-width: 0; max-width: 100%; height: 36px; padding: 0 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--text); font: inherit; }
 .vcell { display: flex; align-items: center; gap: 12px; min-width: 0; }
 .vtext { min-width: 0; display: flex; flex-direction: column; }
 .vtitle { color: var(--text); text-decoration: none; font-weight: 500; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow-wrap: anywhere; }
@@ -420,6 +430,8 @@ a.chip:hover { background: var(--line); }
 .empty-state h2 { font-size: 18px; margin-bottom: 6px; }
 @media (max-width: 760px) {
   .vtable .col-vis, .vtable .col-date, .vtable .col-ratio { display: none; }
+  .vtable .col-template { display: none; }
+  .vtable .col-pick { width: 28px; }
   .vtable .col-num { width: 56px; }
   .vtable .col-score { width: 56px; }
   .thumb.sm { width: 72px; }

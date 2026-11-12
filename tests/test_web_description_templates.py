@@ -216,9 +216,11 @@ def test_the_coverage_strip_counts_a_small_catalog(tmp_path: Path) -> None:
     assert number("tp-cover-needs") == "2"
     assert number("tp-cover-excluded") == "2"
     assert number("tp-cover-none") == "0"
-    # only "Need changes" has an existing Videos filter (the failed check)
+    # "Need changes" links to the failed check, "Excluded" to the Template filter; "No template" (0) and
+    # "Follow their template" (no exact filter) stay plain
     assert 'href="/videos?check=description_template"' in cover
-    assert cover.count("<a ") == 1
+    assert 'href="/videos?template=excluded"' in cover
+    assert cover.count("<a ") == 2
 
 
 def test_chips_show_each_template_with_its_video_count_and_the_default(tmp_path: Path) -> None:

@@ -69,6 +69,7 @@ from ..quota import QuotaExceeded, QuotaGuard
 from ..seo import TAGS_CHAR_LIMIT, CategoryJudgment, parse_duration, score_catalog, tags_char_count, video_category_id
 from .videofacts import build_facts
 from .views import stale_youtube_keys
+from .views import TemplateData, listing_back
 from .video_analytics_view import build_video_analytics
 from .category_view import build_category_view
 from .pinned_view import build_pinned_view
@@ -225,6 +226,7 @@ CHANNEL_SORT_TIMEOUT_MESSAGE = (
 CHANNEL_COMMENTS_PATH = "/comments"
 NO_PACKAGING_KEY = "There is no Meta API key. Add one in Configuration. Nothing was sent."
 MAX_ID_DIGITS = 12  # a variant id in a URL; longer is never a real one
+MAX_BULK_TEMPLATE = 200  # videos one Set template on the Videos table may change
 MAX_PATH_CHARS = 1000
 UPLOADS_DIR = "tmp/uploads"  # under the Yezatas home: the video files the browser handed over
 LOCAL_NO_KEY_MESSAGE = (
@@ -2362,6 +2364,7 @@ def create_app(
             pinned_states = store.pinned_states()
             # How each description follows its template, and the length of its own text.
             template_judgments, own_chars = descriptiontemplate_mod.judge_catalog(store, videos)
+            template_names = [(t.id, t.name) for t in store.list_description_templates()]
             guard = QuotaGuard(store, config.daily_quota_budget)
             used, remaining = guard.used(), guard.remaining()
             pull = store.latest_pull()
@@ -2371,6 +2374,8 @@ def create_app(
             "entries": entries, "as_of": pull_moment(pull) if pull is not None else None, "stale": stale,
             "latest_pull": {"videos": latest[0], "when": _local_time(latest[1])},
             "quota": {"used": used, "remaining": remaining, "budget": config.daily_quota_budget},
+            # the same judgments the scores used, for the Videos table's Template column and filter
+            "templates": TemplateData(template_names, template_judgments),
         }
 
     def outlier_scores(data: dict[str, Any]) -> list[outliers_mod.OutlierScore]:
@@ -2798,7 +2803,7 @@ def create_app(
         if data is None:
             return back_to_setup()
         scores = {s.video_id: s for s in outlier_scores(data)}
-        listing = build_listing(data["entries"], dict(request.query_params), scores)
+        listing = build_listing(data["entries"], dict(request.query_params), scores, data["templates"])
         return render(request, "videos.html", {"active": "content", "listing": listing,
                                                "q": listing.q, "draft_ids": draft_ids()})
 
@@ -3731,6 +3736,57 @@ def create_app(
     def template_back(video_id: str, view: str = "") -> str:
         query = f"?view={view}" if view in (template_sections_view_mod.SECTIONS, template_sections_view_mod.TEXT) else ""
         return f"/videos/{quote(video_id)}{query}#edit"
+
+    @app.post("/videos/template")
+    async def set_videos_template(request: Request) -> Response:
+        """Set the template choice of the videos ticked on the Videos table, then go back to the same list."""
+        form = await read_form(request)
+        choice = str(form.get("choice") or "")
+        ids = list(dict.fromkeys(str(v) for v in form.getlist("video") if str(v)))
+        list_params = {k: str(form.get(k) or "") for k in
+                       ("q", "sort", "dir", "visibility", "band", "check", "outliers", "template", "page")}
+
+        def run() -> tuple[str, tuple[str, str]]:
+            with Store(config.catalog_db) as store:
+                template_ids = [t.id for t in store.list_description_templates()]
+                back = listing_back(list_params, template_ids)
+                if not ids:
+                    return back, ("error", "Tick at least one video.")
+                if len(ids) > MAX_BULK_TEMPLATE:
+                    return back, ("error", f"Tick at most {MAX_BULK_TEMPLATE} videos at once.")
+                found = None
+                if choice not in (template_sections_view_mod.AUTO, template_sections_view_mod.EXCLUDE):
+                    wanted = _template_id(choice)
+                    found = store.get_description_template(wanted) if wanted is not None else None
+                    if found is None:
+                        return back, ("error", "That template does not exist.")
+                known = [vid for vid in ids if store.get_video(vid) is not None]
+                for vid in known:
+                    if found is not None:
+                        store.set_template_choice(vid, found.id)
+                    elif choice == template_sections_view_mod.EXCLUDE:
+                        store.exclude_from_templates(vid)
+                    else:
+                        store.clear_template_choice(vid)
+            n = len(known)
+            if not n:
+                return back, ("error", "None of the ticked videos are in the catalog.")
+            videos = f"{n} video{'' if n == 1 else 's'}"
+            if found is not None:
+                text = f"Set {videos} to {found.name}."
+            elif choice == template_sections_view_mod.EXCLUDE:
+                text = f"Left {videos} out of templates."
+            else:
+                text = f"{videos} {'now follows' if n == 1 else 'now follow'} the automatic choice."
+            skipped = len(ids) - n
+            if skipped:
+                text += (f" Skipped {skipped} video{'' if skipped == 1 else 's'} "
+                         f"that {'is' if skipped == 1 else 'are'} not in the catalog.")
+            return back, ("ok", text)
+
+        back, outcome = await run_in_threadpool(run)
+        flash(request, *outcome)
+        return see_other(back)
 
     @app.post("/videos/{video_id}/template")
     async def set_video_template(request: Request, video_id: str) -> Response:

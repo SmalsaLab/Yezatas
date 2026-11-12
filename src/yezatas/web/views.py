@@ -11,7 +11,7 @@ import re
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timezone
 from typing import Any, Callable, Collection, Iterable, Mapping, Sequence
-from urllib.parse import quote, urlencode
+from urllib.parse import parse_qsl, quote, urlencode, urlsplit
 
 from markupsafe import Markup, escape
 
@@ -25,8 +25,8 @@ from ..links import SKIPPED_MESSAGE, LinkCheckSummary, LinkEntry
 from ..outliers import (BELOW_THRESHOLD, DESCRIPTION_CHARS, MAX_EXPLAINED, MAX_TYPICAL, MIN_AGE_DAYS,
                         OUTLIER_THRESHOLD, PEERS, OutlierScore, below_norm, outliers, ratio_label)
 from ..push import PushItem
-from ..seo import (CATEGORIES, CHAPTERS_MIN_DURATION, CheckResult, Scorecard, chapter_problem,
-                   fix_priority, parse_chapters, parse_duration)
+from ..seo import (CATEGORIES, CHAPTERS_MIN_DURATION, CheckResult, Scorecard, TemplateJudgment,
+                   chapter_problem, fix_priority, parse_chapters, parse_duration)
 from ..store import (AdCheck, AgentRun, CopilotProposal, CopilotTurn, DraftRow, OutlierReport, ShortsFind,
                      PackagingReview, PushRecord, PushRun, SubtitleTranslationRecord,
                      ThumbnailVariant, TranscriptRecord, TranslationRecord, Video, Comment,
@@ -69,6 +69,7 @@ SORTS: tuple[tuple[str, str, str, str, str], ...] = (
     ("views", "Views", "desc", "fewest first", "most first"),
     ("norm", "vs norm", "desc", "lowest first", "highest first"),
     ("score", "SEO score", "asc", "lowest first", "highest first"),
+    ("template", "Template", "asc", "A to Z", "Z to A"),  # shown only when a description template exists
 )
 DEFAULT_SORT = "date"
 SORT_KEYS = ("fix", *(s[0] for s in SORTS))
@@ -82,6 +83,10 @@ VISIBILITIES: tuple[tuple[str, str], ...] = (
     ("private", "Private"),
 )
 VISIBILITY_KEYS = tuple(v[0] for v in VISIBILITIES)
+# the Template filter: a template id, or one of these
+TEMPLATE_EXCLUDED, TEMPLATE_NONE = "excluded", "none"
+TEMPLATE_CHECK = "description_template"
+MAX_TEMPLATE_ID_DIGITS = 12
 
 _MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
 
@@ -150,6 +155,7 @@ class Entry:
     video: Video
     card: Scorecard
     score: OutlierScore | None = None  # how its views compare with its peers; set for the content table
+    template: TemplateJudgment | None = None  # how it follows its description template; set for the content table
 
     @property
     def is_outlier(self) -> bool:
@@ -208,6 +214,35 @@ class Entry:
     @property
     def priority(self) -> float:
         return fix_priority(self.video, self.card)
+
+    @property
+    def template_kind(self) -> str:
+        """"template" (a template applies), TEMPLATE_EXCLUDED or TEMPLATE_NONE."""
+        j = self.template
+        if j is not None and j.applicable:
+            return "template"
+        return TEMPLATE_EXCLUDED if j is not None and j.excluded else TEMPLATE_NONE
+
+    @property
+    def template_label(self) -> str:
+        kind = self.template_kind
+        if kind == "template":
+            return self.template.template_name if self.template is not None else ""
+        return "Excluded" if kind == TEMPLATE_EXCLUDED else "None"
+
+    @property
+    def template_reason(self) -> str:
+        return self.template.reason if self.template is not None else ""
+
+    @property
+    def template_points(self) -> str:
+        """The template check's points as "N of 10", read from the scorecard; "" when it does not apply."""
+        if self.template_kind != "template":
+            return ""
+        for c in self.card.checks:
+            if c.check_id == TEMPLATE_CHECK and c.applicable:
+                return f"{c.points} of {c.max_points}"
+        return ""
 
 
 def make_entries(videos: Sequence[Video], cards: Mapping[str, Scorecard]) -> list[Entry]:
@@ -268,7 +303,8 @@ def _page_number(raw: str | None) -> int:
 
 
 def listing_href(q: str = "", sort: str = DEFAULT_SORT, visibility: str = "all", band: str = "",
-                 check: str = "", page: int = 1, outliers: bool = False, direction: str = "") -> str:
+                 check: str = "", page: int = 1, outliers: bool = False, direction: str = "",
+                 template: str = "") -> str:
     """A /videos URL that carries only the non-default parameters."""
     params: list[tuple[str, str]] = []
     if q:
@@ -285,6 +321,8 @@ def listing_href(q: str = "", sort: str = DEFAULT_SORT, visibility: str = "all",
         params.append(("check", check))
     if outliers:
         params.append(("outliers", "1"))
+    if template:
+        params.append(("template", template))
     if page > 1:
         params.append(("page", str(page)))
     return "/videos" + (f"?{urlencode(params)}" if params else "")
@@ -336,6 +374,11 @@ class Listing:
     next_href: str = ""
     clear_check_href: str = ""
     filtered: bool = False
+    templates_on: bool = False  # at least one description template exists: the column, chips and bar show
+    template: str = ""  # the Template filter: a template id, TEMPLATE_EXCLUDED, TEMPLATE_NONE or ""
+    template_chips: list[Chip] = field(default_factory=list)
+    template_options: list[tuple[int, str]] = field(default_factory=list)  # (id, name) for the bar's select
+    form_fields: list[tuple[str, str]] = field(default_factory=list)  # this list's parameters, for the bar
 
     @property
     def first(self) -> int:
@@ -370,6 +413,10 @@ _SORT_KEYS: dict[str, Callable[[Entry], tuple[Any, str]]] = {
     "date": lambda e: (e.video.published_at or "", e.video.video_id),
     "views": lambda e: (e.video.view_count, e.video.video_id),
     "score": lambda e: (e.card.score, e.video.video_id),
+    # templates by name, then Excluded, then None; then the title
+    "template": lambda e: ((("template", "excluded", "none").index(e.template_kind),
+                            e.template_label.casefold() if e.template_kind == "template" else "",
+                            (e.video.title or "").casefold()), e.video.video_id),
 }
 
 
@@ -395,23 +442,81 @@ def _column(key: str, label: str, first: str, words: tuple[str, str], sort: str,
                       title=f"Order by {label}, {reads}")
 
 
-def build_listing(entries: Sequence[Entry], params: Mapping[str, str],
-                  scores: Mapping[str, OutlierScore] | None = None) -> Listing:
-    """Filter, sort and paginate. Unknown values fall back to the defaults; never raises.
+@dataclass(frozen=True)
+class TemplateData:
+    """The description templates (id, name) in the store's order, and every video's judgment from
+    `descriptiontemplate.judge_catalog` (the one `catalog_data` already made for the scores)."""
+    templates: Sequence[tuple[int, str]]
+    judgments: Mapping[str, TemplateJudgment]
 
-    `scores` (video id -> OutlierScore) feeds the vs norm column, its sort and the Outliers filter."""
+
+def _template_filter(raw: str | None, template_ids: Collection[int]) -> str:
+    value = (raw or "").strip()
+    if not template_ids:
+        return ""
+    if value in (TEMPLATE_EXCLUDED, TEMPLATE_NONE):
+        return value
+    if value.isascii() and value.isdigit() and len(value) <= MAX_TEMPLATE_ID_DIGITS and int(value) in template_ids:
+        return str(int(value))
+    return ""
+
+
+def _listing_params(params: Mapping[str, str], template_ids: Collection[int]) -> dict[str, Any]:
+    """The list's parameters, checked; unknown values fall back to the defaults. The template filter and
+    sorting by template need at least one template."""
     q = (params.get("q") or "").strip()[:MAX_QUERY_CHARS]
     raw_sort = params.get("sort")
     sort = _pick(SORT_ALIASES.get(raw_sort or "", raw_sort), SORT_KEYS, DEFAULT_SORT)
-    direction = "" if sort == "fix" else _pick(params.get("dir"), DIRECTIONS, FIRST_DIRECTION[sort])
-    visibility = _pick(params.get("visibility"), VISIBILITY_KEYS, "all")
-    band = _pick(params.get("band"), BAND_KEYS, "")
-    check = (params.get("check") or "").strip()[:100]
-    only_outliers = (params.get("outliers") or "").strip() == "1"
+    if sort == "template" and not template_ids:
+        sort = DEFAULT_SORT
+    return {
+        "q": q, "sort": sort,
+        "direction": "" if sort == "fix" else _pick(params.get("dir"), DIRECTIONS, FIRST_DIRECTION[sort]),
+        "visibility": _pick(params.get("visibility"), VISIBILITY_KEYS, "all"),
+        "band": _pick(params.get("band"), BAND_KEYS, ""),
+        "check": (params.get("check") or "").strip()[:100],
+        "outliers": (params.get("outliers") or "").strip() == "1",
+        "template": _template_filter(params.get("template"), template_ids),
+    }
+
+
+def listing_back(params: Mapping[str, str], template_ids: Collection[int]) -> str:
+    """The /videos address for posted list parameters, rebuilt from the checked values only (never the
+    posted text), so it cannot point anywhere but /videos."""
+    return listing_href(page=max(_page_number(params.get("page")), 1), **_listing_params(params, template_ids))
+
+
+def _template_matches(entry: Entry, value: str) -> bool:
+    if value in (TEMPLATE_EXCLUDED, TEMPLATE_NONE):
+        return entry.template_kind == value
+    return (entry.template_kind == "template" and entry.template is not None
+            and str(entry.template.template_id) == value)
+
+
+def build_listing(entries: Sequence[Entry], params: Mapping[str, str],
+                  scores: Mapping[str, OutlierScore] | None = None,
+                  templates: TemplateData | None = None) -> Listing:
+    """Filter, sort and paginate. Unknown values fall back to the defaults; never raises.
+
+    `scores` (video id -> OutlierScore) feeds the vs norm column, its sort and the Outliers filter.
+    `templates` feeds the Template column, its sort, its filter and the bar that changes it; with no
+    templates none of them show."""
+    names = list(templates.templates) if templates is not None else []
+    templates_on = bool(names)
+    parsed = _listing_params(params, [tid for tid, _ in names])
+    q, sort, direction = parsed["q"], parsed["sort"], parsed["direction"]
+    visibility, band, check = parsed["visibility"], parsed["band"], parsed["check"]
+    only_outliers, template = parsed["outliers"], parsed["template"]
 
     rows = list(entries)
-    if scores:
-        rows = [replace(e, score=scores.get(e.video.video_id)) for e in rows]
+    if scores or templates_on:
+        judgments = templates.judgments if templates is not None and templates_on else {}
+        rows = [replace(e, score=scores.get(e.video.video_id) if scores else e.score,
+                        template=judgments.get(e.video.video_id) if templates_on else e.template)
+                for e in rows]
+    every = rows  # the whole catalog, for the Template chips' counts
+    if template:
+        rows = [e for e in rows if _template_matches(e, template)]
     if q:
         needle = q.casefold()
         rows = [e for e in rows if _matches(e, needle)]
@@ -441,9 +546,21 @@ def build_listing(entries: Sequence[Entry], params: Mapping[str, str],
     def href(**changes: object) -> str:
         args: dict[str, object] = {"q": q, "sort": sort, "visibility": visibility, "band": band,
                                    "check": check, "outliers": only_outliers, "page": 1,
-                                   "direction": direction}
+                                   "direction": direction, "template": template}
         args.update(changes)
         return listing_href(**args)  # type: ignore[arg-type]
+
+    template_chips: list[Chip] = []
+    if templates_on:
+        kinds = [(e.template_kind, e.template.template_id if e.template is not None else 0) for e in every]
+        template_chips.append(Chip("Any template", href(template=""), template == ""))
+        for tid, name in names:
+            n = sum(1 for kind, i in kinds if kind == "template" and i == tid)
+            template_chips.append(Chip(f"{name} ({n})", href(template=str(tid)), template == str(tid)))
+        for key, label in ((TEMPLATE_EXCLUDED, "Excluded"), (TEMPLATE_NONE, "No template")):
+            n = sum(1 for kind, _ in kinds if kind == key)
+            if n or template == key:
+                template_chips.append(Chip(f"{label} ({n})", href(template=key), template == key))
 
     listing = Listing(
         entries=shown, total=total, page=page, pages=pages, q=q, sort=sort, direction=direction,
@@ -453,7 +570,7 @@ def build_listing(entries: Sequence[Entry], params: Mapping[str, str],
         band_chips=[Chip("Any score", href(band=""), band == "")]
         + [Chip(f"{label} ({rng})", href(band=key), key == band) for key, label, rng in BANDS],
         columns={key: _column(key, label, first, (asc, desc), sort, direction, href)
-                 for key, label, first, asc, desc in SORTS},
+                 for key, label, first, asc, desc in SORTS if key != "template" or templates_on},
         fix_chip=Chip("Fix next first", href(sort=DEFAULT_SORT, direction="") if sort == "fix"
                       else href(sort="fix", direction=""), sort == "fix"),
         outliers=only_outliers,
@@ -462,7 +579,10 @@ def build_listing(entries: Sequence[Entry], params: Mapping[str, str],
         prev_href=href(page=page - 1) if page > 1 else "",
         next_href=href(page=page + 1) if page < pages else "",
         clear_check_href=href(check=""),
-        filtered=bool(q or check or band or only_outliers or visibility != "all"),
+        filtered=bool(q or check or band or only_outliers or template or visibility != "all"),
+        templates_on=templates_on, template=template, template_chips=template_chips,
+        template_options=names,
+        form_fields=parse_qsl(urlsplit(href(page=page)).query),
     )
     return listing
 

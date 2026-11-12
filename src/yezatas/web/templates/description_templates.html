@@ -30,8 +30,16 @@
   {% else %}
   <div class="tp-stat" id="tp-cover-needs"><span class="tp-stat-k">Need changes</span><span class="tp-stat-v">0</span></div>
   {% endif %}
-  <div class="tp-stat" id="tp-cover-excluded"><span class="tp-stat-k">Excluded</span><span class="tp-stat-v">{{ tp.cover.excluded }}</span></div>
-  <div class="tp-stat" id="tp-cover-none"><span class="tp-stat-k">No template</span><span class="tp-stat-v">{{ tp.cover.no_template }}</span></div>
+  {% if tp.cover.excluded %}
+  <a class="tp-stat" id="tp-cover-excluded" href="{{ tp.cover.excluded_url }}"><span class="tp-stat-k">Excluded</span><span class="tp-stat-v">{{ tp.cover.excluded }}</span></a>
+  {% else %}
+  <div class="tp-stat" id="tp-cover-excluded"><span class="tp-stat-k">Excluded</span><span class="tp-stat-v">0</span></div>
+  {% endif %}
+  {% if tp.cover.no_template %}
+  <a class="tp-stat" id="tp-cover-none" href="{{ tp.cover.none_url }}"><span class="tp-stat-k">No template</span><span class="tp-stat-v">{{ tp.cover.no_template }}</span></a>
+  {% else %}
+  <div class="tp-stat" id="tp-cover-none"><span class="tp-stat-k">No template</span><span class="tp-stat-v">0</span></div>
+  {% endif %}
 </div>
 
 <div class="tp-chips" id="tp-chips">

@@ -26,6 +26,23 @@
     });
   });
 
+  // Tick-all on the Videos table: ticks or clears every row checkbox of its form. Hidden without JS.
+  document.querySelectorAll("[data-pick-all]").forEach(function (all) {
+    var boxes = all.form ? all.form.querySelectorAll("input[type=checkbox][name='" + all.getAttribute("data-pick-all") + "']") : [];
+    var sync = function () {
+      var ticked = Array.prototype.filter.call(boxes, function (b) { return b.checked; }).length;
+      all.checked = boxes.length > 0 && ticked === boxes.length;
+      all.indeterminate = ticked > 0 && ticked < boxes.length;
+    };
+    all.addEventListener("change", function () {
+      boxes.forEach(function (b) { b.checked = all.checked; });
+      sync();
+    });
+    boxes.forEach(function (b) { b.addEventListener("change", sync); });
+    sync();
+    all.hidden = false;
+  });
+
   // Slide guides: one screen at a time, Back / Next and dots. Without JS every slide is shown.
   document.querySelectorAll("[data-slider]").forEach(function (slider) {
     var slides = Array.prototype.slice.call(slider.querySelectorAll("[data-slide]"));

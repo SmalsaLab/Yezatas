@@ -113,6 +113,8 @@ def test_the_column_sits_after_the_video_and_the_bar_wraps_the_table(tmp_path: P
     bar = form.split('id="vt-bulkbar"')[1].split("</div>")[0]
     options = re.findall(r'<option value="([^"]*)">([^<]*)</option>', bar)
     names = [t.name for t in descriptiontemplate_templates(ui)]
+    # "Choose…" comes first, empty and selected, and the select is required
+    assert '<select id="vt-choice" name="choice" required>\n      <option value="" selected>Choose…</option>' in bar
     assert options[0] == ("auto", "Automatic") and options[-1] == ("exclude", "Exclude from templates")
     assert [o[1] for o in options[1:-1]] == names == ["Main", "Reviews"]
     assert '<button class="button" type="submit">Set template</button>' in bar
@@ -149,7 +151,9 @@ def test_the_column_text_for_each_assignment(tmp_path: Path) -> None:
     assert cell(html, "vid000003") == ("Excluded", "You excluded this video.")
     assert cell(html, "vid000004") == ("Excluded", "Shorts are excluded from templates.")
     assert cell(html, "vid000005")[0] == "Reviews"
-    assert cell(html, "vid000005")[1].startswith("Chosen on the video page. &middot; ")
+    assert cell(html, "vid000005")[1].startswith("Chosen by you. &middot; ")
+    state = ui.client.get("/videos/vid000005").text.split('id="tp-vstate"')[1].split("</p>")[0]
+    assert "<strong>Reviews</strong>" in state and "Chosen by you." in state
     assert 'class="vt-tpl muted">Excluded<' in row(html, "vid000003")
 
 
@@ -340,13 +344,27 @@ def test_no_ids_a_deleted_template_and_too_many(tmp_path: Path) -> None:
     assert flashes(ui) == "Tick at least one video."
     with store_of(ui) as store:
         store.delete_description_template(reviews)
-    for bad in (str(reviews), "", "abc", "9" * 30, "-1"):
+    for bad in (str(reviews), "abc", "9" * 30, "-1"):
         post(ui, {"video": ["vid000001"], "choice": bad})
         assert flashes(ui) == "That template does not exist.", bad
     ids = [f"vid{n:06d}" for n in range(1, MAX_BULK_TEMPLATE + 2)]
     post(ui, {"video": ids, "choice": "exclude"})
     assert flashes(ui) == f"Tick at most {MAX_BULK_TEMPLATE} videos at once."
     assert choices(ui) == before
+
+
+def test_no_choice_changes_nothing_and_comes_back_to_the_list(tmp_path: Path) -> None:
+    ui = make_dt_ui(tmp_path)
+    main, reviews = with_reviews(ui)
+    with store_of(ui) as store:
+        store.set_template_choice("vid000001", reviews)
+    before = choices(ui)
+    for data in ({"choice": ""}, {}):
+        resp = post(ui, {**data, "video": ["vid000001", "vid000002"], "template": str(reviews), "sort": "title"})
+        assert resp.status_code == 303
+        assert resp.headers["location"] == f"/videos?sort=title&template={reviews}"
+        assert flashes(ui) == "Choose a template first."
+        assert choices(ui) == before
 
 
 def test_the_limit_counts_distinct_ids(tmp_path: Path) -> None:

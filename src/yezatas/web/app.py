@@ -3752,6 +3752,8 @@ def create_app(
                 back = listing_back(list_params, template_ids)
                 if not ids:
                     return back, ("error", "Tick at least one video.")
+                if not choice:
+                    return back, ("error", "Choose a template first.")
                 if len(ids) > MAX_BULK_TEMPLATE:
                     return back, ("error", f"Tick at most {MAX_BULK_TEMPLATE} videos at once.")
                 found = None

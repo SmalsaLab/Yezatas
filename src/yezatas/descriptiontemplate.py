@@ -140,7 +140,7 @@ def assign_template(video: Video, templates: Sequence[DescriptionTemplate],
     by_id = {t.id: t for t in templates}
     chosen = choices.get(video.video_id)
     if chosen is not None and chosen in by_id:
-        return Assignment(by_id[chosen], False, "Chosen on the video page.")
+        return Assignment(by_id[chosen], False, "Chosen by you.")
     if seo.is_short(video) and not include_shorts:
         return Assignment(None, True, "Shorts are excluded from templates.")
     ordered = sorted(templates, key=lambda t: (t.position, t.id))

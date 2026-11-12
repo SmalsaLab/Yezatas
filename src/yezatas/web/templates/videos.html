@@ -47,7 +47,8 @@
   {% endfor %}
   <div class="vt-bulkbar" id="vt-bulkbar">
     <label for="vt-choice">Template for the ticked videos</label>
-    <select id="vt-choice" name="choice">
+    <select id="vt-choice" name="choice" required>
+      <option value="" selected>Choose…</option>
       <option value="auto">Automatic</option>
       {% for tid, name in listing.template_options %}<option value="{{ tid }}">{{ name }}</option>
       {% endfor %}<option value="exclude">Exclude from templates</option>

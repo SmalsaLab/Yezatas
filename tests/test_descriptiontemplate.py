@@ -84,7 +84,7 @@ def test_step2_chosen_by_hand_wins_over_rules_and_default():
     chosen = template(2, "Compost", 1)
     result = assign(make_video(), [rule_tpl, chosen], choices={"v1": 2})
     assert result.template == chosen and not result.excluded
-    assert result.reason == "Chosen on the video page."
+    assert result.reason == "Chosen by you."
 
 
 def test_step2_a_deleted_chosen_template_falls_through_to_the_rules():
@@ -593,7 +593,7 @@ def test_judge_catalog_follows_the_shorts_setting_and_hand_choices(store: Store)
     short = make_video("v1", description=OPENING, duration="PT30S")
     assert not judge_catalog(store, [short])[0]["v1"].applicable
     store.set_template_choice("v1", main)
-    assert judge_catalog(store, [short])[0]["v1"].reason == "Chosen on the video page."
+    assert judge_catalog(store, [short])[0]["v1"].reason == "Chosen by you."
     store.clear_template_choice("v1")
     store.set_templates_include_shorts(True)
     assert judge_catalog(store, [short])[0]["v1"].reason == "Default template."
